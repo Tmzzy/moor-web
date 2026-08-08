@@ -1,58 +1,47 @@
-import { getSidecarInfo } from "@/lib/tauri";
-import type { SidecarInfo } from "@moor/types";
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
 
-const defaultRuntime = (): SidecarInfo => ({
-  port: 9223,
-  baseUrl: import.meta.env.VITE_MOOR_API_URL ?? "http://127.0.0.1:9223",
-  apiToken: import.meta.env.VITE_MOOR_API_TOKEN ?? "dev-token",
-});
+import type { RuntimeInfo } from "@moor/types";
 
-async function getRuntimeInfo(): Promise<SidecarInfo> {
-  try {
-    return await getSidecarInfo();
-  } catch {
-    // Outside Tauri (e.g. `pnpm dev` in a plain browser) there is no in-process
-    // gateway. Point at one via VITE_MOOR_API_URL / VITE_MOOR_API_TOKEN; otherwise
-    // API calls surface errors. The desktop dev loop is `pnpm tauri dev`.
-    return defaultRuntime();
+const FALLBACK_BASE_URL = "http://127.0.0.1:9223";
+
+function runtimeBaseUrl(): string {
+  const configured = import.meta.env.VITE_MOOR_API_URL?.trim();
+  if (configured) return configured.replace(/\/$/, "");
+  if (typeof window !== "undefined" && window.location.origin !== "null") {
+    return window.location.origin;
   }
+  return FALLBACK_BASE_URL;
 }
 
-let runtimeInfo: SidecarInfo | null = null;
-let runtimeInfoPromise: Promise<SidecarInfo> | null = null;
+function resolveRuntime(): RuntimeInfo {
+  const baseUrl = runtimeBaseUrl();
+  const url = new URL(baseUrl);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  return { port, baseUrl, mcpUrl: `${baseUrl}/mcp` };
+}
+
+let runtimeInfo: RuntimeInfo | null = null;
 
 export function resetRuntime(): void {
   runtimeInfo = null;
-  runtimeInfoPromise = null;
 }
 
-export async function getApiRuntime(): Promise<SidecarInfo> {
-  if (runtimeInfo) {
-    return runtimeInfo;
-  }
-  if (!runtimeInfoPromise) {
-    runtimeInfoPromise = getRuntimeInfo()
-      .then((info) => {
-        runtimeInfo = info;
-        return info;
-      })
-      .finally(() => {
-        runtimeInfoPromise = null;
-      });
-  }
-  return runtimeInfoPromise;
+export async function getApiRuntime(): Promise<RuntimeInfo> {
+  runtimeInfo ??= resolveRuntime();
+  return runtimeInfo;
 }
 
-export async function refreshApiRuntime(): Promise<SidecarInfo> {
+export async function refreshApiRuntime(): Promise<RuntimeInfo> {
   resetRuntime();
   return getApiRuntime();
 }
 
-export function buildApiUrl(runtime: SidecarInfo, path: string): string {
+export function buildApiUrl(runtime: RuntimeInfo, path: string): string {
   return `${runtime.baseUrl}${path}`;
 }
 
-export function buildApiHeaders(runtime: SidecarInfo, extra?: HeadersInit): HeadersInit {
+export function buildApiHeaders(_runtime: RuntimeInfo, extra?: HeadersInit): HeadersInit {
   const extraHeaders = new Headers(extra);
   const headers: Record<string, string> = {};
   if (!extraHeaders.has("Content-Type")) {
@@ -61,6 +50,5 @@ export function buildApiHeaders(runtime: SidecarInfo, extra?: HeadersInit): Head
   extraHeaders.forEach((value, key) => {
     headers[key] = value;
   });
-  headers["X-Moor-Token"] = runtime.apiToken;
   return headers;
 }

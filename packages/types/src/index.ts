@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 export type {
   ConnectionType,
   Server,
@@ -37,7 +40,7 @@ export type {
   SettingsUpdatePayload,
   ThemeMode,
 } from "./settings.js";
-export type { SidecarInfo } from "./sidecar.js";
+export type { RuntimeInfo } from "./runtime.js";
 export type { ApiErrorCode, ApiError } from "./error.js";
 export {
   MCP_TIMEOUT_MS_DEFAULT,

@@ -1,0 +1,36 @@
+[package]
+name = "moor-server"
+version = "0.0.1"
+edition = "2021"
+authors = ["varandrew <varandrewchen@gmail.com>", "Moor contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/Tmzzy/moor-web"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+tracing = "0.1"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex-lite = "0.1"
+toml = "0.8"
+dirs = "6"
+base64 = "0.22"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = "s"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

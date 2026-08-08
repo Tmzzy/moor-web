@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 import { createContext, useContext, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { getApiRuntime, buildApiUrl, buildApiHeaders, resetRuntime } from "@/lib/api/runtime";
 import type { MoorEvent, MoorEventData, MoorEventType, ServerStatus } from "@moor/types";
@@ -94,6 +97,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
         });
         const response = await fetch(url, {
           headers,
+          credentials: "same-origin",
           signal: controller.signal,
         });
         if (!response.ok || !response.body) throw new Error(`SSE failed: ${response.status}`);

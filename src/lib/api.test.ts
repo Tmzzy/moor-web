@@ -1,22 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { SidecarInfo } from "@moor/types";
+import type { RuntimeInfo } from "@moor/types";
 import { api } from "./api/client";
 import { formatApiNetworkError } from "./api/errors";
 import { resetRuntime } from "./api/runtime";
 
-const { invokeMock } = vi.hoisted(() => ({
-  invokeMock: vi.fn<() => Promise<SidecarInfo>>(),
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: invokeMock,
-}));
-
-function runtime(port: number, apiToken: string): SidecarInfo {
+function runtime(port: number): RuntimeInfo {
   return {
     port,
     baseUrl: `http://127.0.0.1:${port}`,
-    apiToken,
+    mcpUrl: `http://127.0.0.1:${port}/mcp`,
   };
 }
 
@@ -28,20 +23,15 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
   });
 }
 
-describe("api runtime recovery", () => {
-  beforeEach(() => {
-    resetRuntime();
-    invokeMock.mockReset();
-  });
+describe("web API client", () => {
+  beforeEach(() => resetRuntime());
 
   afterEach(() => {
     vi.restoreAllMocks();
     resetRuntime();
   });
 
-  it("refreshes runtime and retries once after a network failure", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "old-token"));
-    invokeMock.mockResolvedValueOnce(runtime(9225, "fresh-token"));
+  it("retries a read once after a network failure", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new TypeError("Load failed"))
@@ -54,40 +44,28 @@ describe("api runtime recovery", () => {
       1,
       "http://127.0.0.1:9223/api/settings",
       expect.objectContaining({
-        headers: expect.objectContaining({ "X-Moor-Token": "old-token" }),
-      }),
-    );
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "http://127.0.0.1:9225/api/settings",
-      expect.objectContaining({
-        headers: expect.objectContaining({ "X-Moor-Token": "fresh-token" }),
+        credentials: "same-origin",
+        headers: expect.objectContaining({ "Content-Type": "application/json" }),
       }),
     );
   });
 
-  it("does not refresh runtime or retry aborted requests", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "token"));
-    invokeMock.mockResolvedValueOnce(runtime(9225, "fresh-token"));
+  it("does not retry aborted requests", async () => {
     const controller = new AbortController();
     controller.abort();
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockRejectedValueOnce(new DOMException("This operation was aborted", "AbortError"))
-      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+      .mockRejectedValueOnce(new DOMException("This operation was aborted", "AbortError"));
 
     await expect(api("/api/settings", { signal: controller.signal })).rejects.toThrow(
       "This operation was aborted",
     );
-
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
   it.each(["POST", "PUT", "PATCH", "DELETE"])(
     "does not retry %s requests after a network failure",
     async (method) => {
-      invokeMock.mockResolvedValueOnce(runtime(9223, "token"));
       const fetchMock = vi
         .spyOn(globalThis, "fetch")
         .mockRejectedValueOnce(new TypeError("Load failed"));
@@ -97,99 +75,48 @@ describe("api runtime recovery", () => {
           method,
           body: method === "DELETE" ? undefined : JSON.stringify({ theme: "dark" }),
         }),
-      ).rejects.toThrow("Unable to connect to the Moor sidecar while requesting /api/settings");
-
+      ).rejects.toThrow("Unable to connect to the Moor server while requesting /api/settings");
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(invokeMock).toHaveBeenCalledTimes(1);
     },
   );
 
-  it("refreshes runtime and retries once after an unauthorized response", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "old-token"));
-    invokeMock.mockResolvedValueOnce(runtime(9225, "fresh-token"));
+  it("does not retry an authentication failure", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized" }, { status: 401 }))
-      .mockResolvedValueOnce(jsonResponse({ theme: "dark" }));
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { message: "Management authentication required" } }, { status: 401 }),
+      );
 
-    await expect(api<{ theme: string }>("/api/settings")).resolves.toEqual({ theme: "dark" });
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("refreshes runtime and retries write requests once after an unauthorized response", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "old-token"));
-    invokeMock.mockResolvedValueOnce(runtime(9225, "fresh-token"));
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized" }, { status: 401 }))
-      .mockResolvedValueOnce(jsonResponse({ theme: "dark" }));
-
-    await expect(
-      api("/api/settings", {
-        method: "POST",
-        body: JSON.stringify({ theme: "dark" }),
-      }),
-    ).resolves.toEqual({ theme: "dark" });
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not retry ordinary API errors", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "token"));
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ error: "Invalid settings" }, { status: 400 }));
-
-    await expect(api("/api/settings")).rejects.toThrow("Invalid settings");
-
+    await expect(api("/api/settings")).rejects.toThrow("Management authentication required");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses structured API error messages when available", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "token"));
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse(
-        { error: { code: "VALIDATION_ERROR", message: "advanced.sidecarPort: Too small" } },
+        { error: { code: "VALIDATION_ERROR", message: "Invalid request timeout" } },
         { status: 400 },
       ),
     );
 
-    await expect(api("/api/settings")).rejects.toThrow("advanced.sidecarPort: Too small");
+    await expect(api("/api/settings")).rejects.toThrow("Invalid request timeout");
   });
 
-  it("falls back to structured API error code when message is missing", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9223, "token"));
+  it("falls back to a structured error code when the message is missing", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({ error: { code: "NOT_FOUND" } }, { status: 404 }),
     );
 
     await expect(api("/api/profiles/missing")).rejects.toThrow("NOT_FOUND");
   });
-
-  it("uses the same runtime for a request URL and token", async () => {
-    invokeMock.mockResolvedValueOnce(runtime(9224, "same-token"));
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ ok: true }));
-
-    await api("/api/settings");
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:9224/api/settings",
-      expect.objectContaining({
-        headers: expect.objectContaining({ "X-Moor-Token": "same-token" }),
-      }),
-    );
-  });
 });
 
 describe("api error formatting", () => {
-  it("adds sidecar context to browser network failures", () => {
+  it("adds server context to browser network failures", () => {
     expect(
-      formatApiNetworkError("/api/settings", new TypeError("Load failed"), runtime(9225, "t")),
+      formatApiNetworkError("/api/settings", new TypeError("Load failed"), runtime(9225)),
     ).toBe(
-      "Unable to connect to the Moor sidecar while requesting /api/settings at http://127.0.0.1:9225. Check that Moor is running and the Sidecar API port/token are current. Original error: Load failed",
+      "Unable to connect to the Moor server while requesting /api/settings at http://127.0.0.1:9225. Check that the server is running and reachable. Original error: Load failed",
     );
   });
 });

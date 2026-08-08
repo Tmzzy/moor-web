@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,7 +12,7 @@ import { getApiRuntime } from "@/lib/api/runtime";
 
 async function getMcpEndpoint(): Promise<string> {
   const runtime = await getApiRuntime();
-  return `${runtime.baseUrl}/mcp`;
+  return runtime.mcpUrl ?? `${runtime.baseUrl}/mcp`;
 }
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { StatCard } from "@/components/shared/StatCard";
@@ -34,7 +37,7 @@ export function Dashboard() {
   const { servers } = useServerList();
   const { profiles } = useProfiles();
   const { logs } = useLogs();
-  const [mcpEndpoint, setMcpEndpoint] = useState("http://127.0.0.1:9223/mcp");
+  const [mcpEndpoint, setMcpEndpoint] = useState("/mcp");
 
   useEffect(() => {
     void getMcpEndpoint().then(setMcpEndpoint);

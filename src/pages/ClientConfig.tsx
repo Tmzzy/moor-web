@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
@@ -11,38 +14,6 @@ import { routes } from "@/lib/api-routes";
 import { ConverterPanel } from "@/components/converter/ConverterPanel";
 import type { ClientSnippet } from "@moor/types";
 
-const FALLBACK_SNIPPETS: ClientSnippet[] = [
-  {
-    client: "Claude Code",
-    description: "Configure Claude Code to connect to Moor",
-    snippet:
-      '{\n  "mcpServers": {\n    "moor": {\n      "url": "http://127.0.0.1:9223/mcp"\n    }\n  }\n}',
-    cliCommand:
-      '# Edit ~/.claude/settings.json and add to mcpServers:\n"moor": { "url": "http://127.0.0.1:9223/mcp" }',
-  },
-  {
-    client: "Codex",
-    description: "Configure Codex to connect to Moor",
-    snippet: '[mcp_servers.moor]\nurl = "http://127.0.0.1:9223/mcp"\nenabled = true',
-    cliCommand:
-      '# Edit ~/.codex/config.toml and add:\n[mcp_servers.moor]\nurl = "http://127.0.0.1:9223/mcp"\nenabled = true',
-  },
-  {
-    client: "OpenCode",
-    description: "Configure OpenCode to connect to Moor",
-    snippet:
-      '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {\n    "moor": {\n      "type": "remote",\n      "url": "http://127.0.0.1:9223/mcp",\n      "enabled": true\n    }\n  }\n}',
-    cliCommand: '# Edit ~/.config/opencode/opencode.json and add the "mcp.moor" entry above.',
-  },
-  {
-    client: "Cursor",
-    description: "Configure Cursor to connect to Moor",
-    snippet:
-      '{\n  "mcpServers": {\n    "moor": {\n      "url": "http://127.0.0.1:9223/mcp"\n    }\n  }\n}',
-    cliCommand: "# Edit ~/.cursor/mcp.json and add the mcpServers.moor entry above.",
-  },
-];
-
 export function ClientConfig() {
   const [activeTab, setActiveTab] = useState("snippets");
   const { data: snippets } = useQuery<ClientSnippet[]>({
@@ -50,7 +21,7 @@ export function ClientConfig() {
     queryFn: () => api<ClientSnippet[]>(routes.import.snippets()),
   });
 
-  const displaySnippets = !snippets || snippets.length === 0 ? FALLBACK_SNIPPETS : snippets;
+  const displaySnippets = snippets ?? [];
 
   return (
     <div className="space-y-6 animate-fade-in-up">

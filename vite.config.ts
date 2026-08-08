@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 import { defineConfig } from "vite-plus";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { readFileSync } from "fs";
 
-const host = process.env.TAURI_DEV_HOST;
 const __dirname = import.meta.dirname;
 const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf8"));
 
@@ -20,7 +22,7 @@ export default defineConfig({
     env: {
       builtin: true,
     },
-    ignorePatterns: ["dist/**", "src-tauri/**"],
+    ignorePatterns: ["dist/**", "backend/**"],
     rules: {
       "constructor-super": "error",
       "for-direction": "error",
@@ -172,15 +174,24 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
+    include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["**/node_modules/**", "**/dist/**"],
   },
   clearScreen: false,
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
-    hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
-    watch: { ignored: ["**/src-tauri/**"] },
+    host: process.env.VITE_DEV_HOST || false,
+    watch: { ignored: ["**/backend/**"] },
+    proxy: {
+      "/api": {
+        target: process.env.VITE_MOOR_PROXY_TARGET ?? "http://127.0.0.1:9223",
+        changeOrigin: false,
+      },
+      "/mcp": {
+        target: process.env.VITE_MOOR_PROXY_TARGET ?? "http://127.0.0.1:9223",
+        changeOrigin: false,
+      },
+    },
   },
 });

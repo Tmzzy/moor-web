@@ -1,4 +1,7 @@
-import type { SidecarInfo } from "@moor/types";
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
+import type { RuntimeInfo } from "@moor/types";
 import { createErrorWithCause } from "@/lib/utils";
 import { getApiRuntime, refreshApiRuntime, buildApiUrl, buildApiHeaders } from "./runtime";
 import {
@@ -17,11 +20,12 @@ export interface RequestOptions extends RequestInit {
 async function fetchWithRuntime(
   path: string,
   options: RequestOptions | undefined,
-  runtime: SidecarInfo,
+  runtime: RuntimeInfo,
 ): Promise<Response> {
   return fetch(buildApiUrl(runtime, path), {
     ...options,
     headers: buildApiHeaders(runtime, options?.headers),
+    credentials: "same-origin",
     signal: options?.signal,
   });
 }
@@ -60,9 +64,6 @@ export async function api<T>(path: string, options?: RequestOptions): Promise<T>
       throw networkError;
     }
     return retryWithFreshRuntime<T>(path, options, networkError);
-  }
-  if (resp.status === 401) {
-    return retryWithFreshRuntime<T>(path, options, new Error(await readApiError(resp)));
   }
   return parseApiResponse<T>(resp);
 }

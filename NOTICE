@@ -1,0 +1,9 @@
+Moor Web
+Copyright 2026 Moor contributors
+
+This product is based on Moor, originally developed by varandrew:
+https://github.com/varandrew/moor
+
+The original desktop shell was replaced with a standalone Rust web server and
+Docker distribution. The original work and these modifications are licensed
+under the Apache License, Version 2.0. See LICENSE.

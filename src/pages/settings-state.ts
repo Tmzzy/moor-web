@@ -1,20 +1,12 @@
-import {
-  MCP_TIMEOUT_MS_MAX,
-  MCP_TIMEOUT_MS_MIN,
-  type GeneralSettings,
-  type SidecarInfo,
-} from "@moor/types";
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
+import { MCP_TIMEOUT_MS_MAX, MCP_TIMEOUT_MS_MIN } from "@moor/types";
 
 export type SettingsPageLoadState =
   | { kind: "loading"; canRenderControls: false }
   | { kind: "error"; canRenderControls: false; message: string }
   | { kind: "ready"; canRenderControls: true };
-
-export type PortBannerState = { kind: "restart" };
-
-export type AdvancedPortStatus = { kind: "mismatch"; currentPort: number; configuredPort: number };
-
-export type GeneralSettingRuntimeAction = "loginAutostart" | "settingsOnly" | "windowRuntime";
 
 export type TimeoutSecondsInputState =
   | { valid: true; milliseconds: number }
@@ -44,46 +36,6 @@ export function getSettingsPageLoadState({
     };
   }
   return { kind: "ready", canRenderControls: true };
-}
-
-export function getPortBannerState({
-  runtimeInfo,
-  configuredPort,
-  portChangeApplied,
-}: {
-  runtimeInfo: SidecarInfo | null;
-  configuredPort: number;
-  portChangeApplied: boolean;
-}): PortBannerState | null {
-  if (!runtimeInfo || runtimeInfo.port === configuredPort) {
-    return null;
-  }
-  return portChangeApplied ? { kind: "restart" } : null;
-}
-
-export function getAdvancedPortStatus({
-  runtimeInfo,
-  configuredPort,
-}: {
-  runtimeInfo: SidecarInfo | null;
-  configuredPort: number;
-}): AdvancedPortStatus | null {
-  if (!runtimeInfo || runtimeInfo.port === configuredPort) {
-    return null;
-  }
-  return { kind: "mismatch", currentPort: runtimeInfo.port, configuredPort };
-}
-
-export function getGeneralSettingRuntimeAction(
-  key: keyof GeneralSettings,
-): GeneralSettingRuntimeAction {
-  if (key === "autoStartOnLogin") {
-    return "loginAutostart";
-  }
-  if (key === "autoStartServersOnLaunch") {
-    return "settingsOnly";
-  }
-  return "windowRuntime";
 }
 
 export function parseTimeoutSecondsInput(value: string): TimeoutSecondsInputState {

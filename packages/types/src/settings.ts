@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
 export type ThemeMode = "light" | "dark" | "system";
 
 export const MCP_TIMEOUT_MS_MIN = 5_000;
@@ -5,11 +8,7 @@ export const MCP_TIMEOUT_MS_MAX = 300_000;
 export const MCP_TIMEOUT_MS_DEFAULT = 30_000;
 
 export interface GeneralSettings {
-  autoStartOnLogin: boolean;
   autoStartServersOnLaunch: boolean;
-  minimizeToTrayOnClose: boolean;
-  hideDockIconOnClose: boolean;
-  showWindowOnLaunch: boolean;
 }
 
 export interface AppearanceSettings {
@@ -19,7 +18,6 @@ export interface AppearanceSettings {
 export interface AdvancedSettings {
   logRetentionDays: number;
   enableAuditLogging: boolean;
-  sidecarPort: number;
   mcpRequestTimeoutMs: number;
   mcpServerStartTimeoutMs: number;
 }
@@ -43,17 +41,12 @@ export function createDefaultSettings(): Settings {
   return {
     version: 1,
     general: {
-      autoStartOnLogin: false,
       autoStartServersOnLaunch: false,
-      minimizeToTrayOnClose: true,
-      hideDockIconOnClose: false,
-      showWindowOnLaunch: true,
     },
     appearance: { theme: "system" },
     advanced: {
       logRetentionDays: 30,
       enableAuditLogging: true,
-      sidecarPort: 9223,
       mcpRequestTimeoutMs: MCP_TIMEOUT_MS_DEFAULT,
       mcpServerStartTimeoutMs: MCP_TIMEOUT_MS_DEFAULT,
     },

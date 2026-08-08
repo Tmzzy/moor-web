@@ -1,21 +1,24 @@
-import type { SidecarInfo } from "@moor/types";
+// SPDX-License-Identifier: Apache-2.0
+// Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
+
+import type { RuntimeInfo } from "@moor/types";
 import { isRecord } from "@/lib/utils";
 
-export function formatApiNetworkError(path: string, err: unknown, runtime?: SidecarInfo): string {
+export function formatApiNetworkError(path: string, err: unknown, runtime?: RuntimeInfo): string {
   const detail = err instanceof Error ? err.message : String(err);
   const target = runtime ? ` at ${runtime.baseUrl}` : "";
-  return `Unable to connect to the Moor sidecar while requesting ${path}${target}. Check that Moor is running and the Sidecar API port/token are current. Original error: ${detail}`;
+  return `Unable to connect to the Moor server while requesting ${path}${target}. Check that the server is running and reachable. Original error: ${detail}`;
 }
 
 export function formatApiRetryError(
   path: string,
-  runtime: SidecarInfo,
+  runtime: RuntimeInfo,
   original: unknown,
   retryFailure: unknown,
 ): string {
   const originalDetail = original instanceof Error ? original.message : String(original);
   const retryDetail = retryFailure instanceof Error ? retryFailure.message : String(retryFailure);
-  return `Unable to connect to the Moor sidecar while requesting ${path} at ${runtime.baseUrl} after refreshing runtime. Original error: ${originalDetail}. Retry error: ${retryDetail}`;
+  return `Unable to connect to the Moor server while requesting ${path} at ${runtime.baseUrl} after retrying. Original error: ${originalDetail}. Retry error: ${retryDetail}`;
 }
 
 export async function readApiError(resp: Response): Promise<string> {

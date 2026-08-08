@@ -1,7 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: 🔍 先搜索现有 issue / Search existing issues
-    url: https://github.com/varandrew/moor/issues?q=is%3Aissue
-    about: |
-      提交前请先搜索是否已有相同问题或建议。
-      Please search existing issues before submitting a new one.

@@ -59,17 +59,6 @@ docs/specs/*
 
 .code-review-graph/
 
-############################
-# Tauri
-############################
-src-tauri/target/
-src-tauri/gen/
-src-tauri/binaries/*
-
-############################
-# Sidecar
-############################
-sidecar/dist/
-sidecar/node_modules/
-~/.moor/
+backend/target/
+data/
 .gitnexus
