@@ -41,6 +41,7 @@ export type {
   ThemeMode,
 } from "./settings.js";
 export type { RuntimeInfo } from "./runtime.js";
+export type { AuthSession, LoginInput, McpTokenResponse } from "./auth.js";
 export type { ApiErrorCode, ApiError } from "./error.js";
 export {
   MCP_TIMEOUT_MS_DEFAULT,

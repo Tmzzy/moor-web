@@ -14,6 +14,14 @@ pub struct AppError {
 }
 
 impl AppError {
+    pub fn invalid_credentials() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_CREDENTIALS",
+            "Invalid username or password",
+        )
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "NOT_FOUND", msg)
     }

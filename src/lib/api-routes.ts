@@ -25,6 +25,11 @@ type LogListParams = {
 };
 
 export const routes = {
+  auth: {
+    session: () => "/api/auth/session",
+    login: () => "/api/auth/login",
+    logout: () => "/api/auth/logout",
+  },
   servers: {
     list: () => "/api/servers",
     detail: (id: string) => `/api/servers/${pathSegment(id)}`,
@@ -51,6 +56,10 @@ export const routes = {
     get: () => "/api/settings",
     update: () => "/api/settings",
     reset: () => "/api/settings/reset",
+  },
+  security: {
+    mcpToken: () => "/api/security/mcp-token",
+    rotateMcpToken: () => "/api/security/mcp-token/rotate",
   },
   logs: {
     list: (params?: LogListParams) => withQuery("/api/logs", params ?? {}),

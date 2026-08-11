@@ -1,14 +1,27 @@
 import { useProfiles } from "@/hooks/useProfiles";
-import { ChevronDown, Check } from "lucide-react";
+import { ChevronDown, Check, Loader2, LogOut } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { useAuth } from "@/contexts/AuthContext";
 
 export function Header() {
   const { profiles, activateProfile } = useProfiles();
+  const { username, logout } = useAuth();
   const [open, setOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   const activeProfile = profiles.find((p) => p.isActive);
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await logout();
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -20,7 +33,7 @@ export function Header() {
 
   return (
     <header className="h-14 border-b border-[var(--fg-08)] bg-surface-200/80 backdrop-blur-md flex items-center justify-between px-6 sticky top-0 z-40">
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <span className="font-body text-sm text-[var(--fg-40)]">Active Profile</span>
         <div className="relative" ref={ref}>
           <button
@@ -71,6 +84,29 @@ export function Header() {
             </div>
           )}
         </div>
+      </div>
+      <div className="ml-4 flex min-w-0 items-center gap-2 border-l border-[var(--fg-08)] pl-4">
+        <span
+          className="max-w-36 truncate font-headline text-xs text-[var(--fg-45)]"
+          title={username ?? undefined}
+        >
+          {username}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          type="button"
+          disabled={loggingOut}
+          aria-label="Sign out"
+          onClick={() => void handleLogout()}
+        >
+          {loggingOut ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <LogOut className="mr-2 h-4 w-4" />
+          )}
+          Sign out
+        </Button>
       </div>
     </header>
   );

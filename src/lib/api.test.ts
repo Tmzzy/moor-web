@@ -6,6 +6,7 @@ import type { RuntimeInfo } from "@moor/types";
 import { api } from "./api/client";
 import { formatApiNetworkError } from "./api/errors";
 import { resetRuntime } from "./api/runtime";
+import { subscribeAuthenticationRequired } from "@/lib/auth-events";
 
 function runtime(port: number): RuntimeInfo {
   return {
@@ -81,6 +82,8 @@ describe("web API client", () => {
   );
 
   it("does not retry an authentication failure", async () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAuthenticationRequired(listener);
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -89,6 +92,14 @@ describe("web API client", () => {
 
     await expect(api("/api/settings")).rejects.toThrow("Management authentication required");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+  });
+
+  it("accepts an empty successful response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await expect(api<void>("/api/auth/logout", { method: "POST" })).resolves.toBeUndefined();
   });
 
   it("uses structured API error messages when available", async () => {

@@ -2,6 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 import { routes } from "./api-routes";
 
 describe("api routes", () => {
+  it("builds authentication and security routes", () => {
+    expect(routes.auth.session()).toBe("/api/auth/session");
+    expect(routes.auth.login()).toBe("/api/auth/login");
+    expect(routes.auth.logout()).toBe("/api/auth/logout");
+    expect(routes.security.mcpToken()).toBe("/api/security/mcp-token");
+    expect(routes.security.rotateMcpToken()).toBe("/api/security/mcp-token/rotate");
+  });
+
   it("encodes dynamic path segments and tool query parameters", () => {
     expect(routes.servers.detail("server/1")).toBe("/api/servers/server%2F1");
     expect(routes.profiles.updateServer("profile&1", "server/1")).toBe(

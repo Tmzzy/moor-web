@@ -1,15 +1,111 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
 
-use super::AppState;
+use std::sync::Arc;
+
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{header, HeaderValue, StatusCode, Uri},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Json, Response},
+    routing::{get, post},
+    Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use tower_sessions::Session;
+
+use super::{app_error::AppError, AppState};
+
+const SESSION_USERNAME_KEY: &str = "username";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginInput {
+    username: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthSessionResponse {
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+}
+
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/auth/session", get(session_status))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+}
+
+fn no_store_header() -> [(header::HeaderName, HeaderValue); 1] {
+    [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))]
+}
+
+async fn session_username(session: &Session) -> Result<Option<String>, AppError> {
+    session
+        .get::<String>(SESSION_USERNAME_KEY)
+        .await
+        .map_err(|error| AppError::internal(format!("failed to read management session: {error}")))
+}
+
+async fn session_status(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+) -> Result<impl IntoResponse, AppError> {
+    let username = session_username(&session)
+        .await?
+        .filter(|username| state.management_auth.matches_username(username));
+    Ok((
+        no_store_header(),
+        Json(AuthSessionResponse {
+            authenticated: username.is_some(),
+            username,
+        }),
+    ))
+}
+
+async fn login(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+    Json(input): Json<LoginInput>,
+) -> Result<impl IntoResponse, AppError> {
+    if !state
+        .management_auth
+        .matches(&input.username, &input.password)
+    {
+        return Err(AppError::invalid_credentials());
+    }
+
+    session
+        .cycle_id()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to rotate session id: {error}")))?;
+    session
+        .insert(SESSION_USERNAME_KEY, &input.username)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("failed to create management session: {error}"))
+        })?;
+
+    Ok((
+        no_store_header(),
+        Json(AuthSessionResponse {
+            authenticated: true,
+            username: Some(input.username),
+        }),
+    ))
+}
+
+async fn logout(session: Session) -> Result<impl IntoResponse, AppError> {
+    session.flush().await.map_err(|error| {
+        AppError::internal(format!("failed to destroy management session: {error}"))
+    })?;
+    Ok((no_store_header(), StatusCode::NO_CONTENT))
+}
 
 fn same_origin(origin: &str, host: &str) -> bool {
     origin
@@ -19,7 +115,7 @@ fn same_origin(origin: &str, host: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -30,8 +126,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn has_valid_basic_auth(state: &AppState, request: &Request) -> bool {
-    let Some(encoded) = authorization_parameter(request, "Basic")
-    else {
+    let Some(encoded) = authorization_parameter(request, "Basic") else {
         return false;
     };
     let Ok(decoded) = STANDARD.decode(encoded) else {
@@ -40,19 +135,9 @@ fn has_valid_basic_auth(state: &AppState, request: &Request) -> bool {
     let Some(separator) = decoded.iter().position(|byte| *byte == b':') else {
         return false;
     };
-    constant_time_eq(
-        &decoded[..separator],
-        state.management_auth.username.as_bytes(),
-    ) && constant_time_eq(
-        &decoded[separator + 1..],
-        state.management_auth.password.as_bytes(),
-    )
-}
-
-fn has_valid_bearer_auth(state: &AppState, request: &Request) -> bool {
-    authorization_parameter(request, "Bearer")
-        .map(|token| constant_time_eq(token.as_bytes(), state.mcp_auth.token.as_bytes()))
-        .unwrap_or(false)
+    state
+        .management_auth
+        .matches_bytes(&decoded[..separator], &decoded[separator + 1..])
 }
 
 fn authorization_parameter<'a>(request: &'a Request, expected_scheme: &str) -> Option<&'a str> {
@@ -65,17 +150,12 @@ fn authorization_parameter<'a>(request: &'a Request, expected_scheme: &str) -> O
     (scheme.eq_ignore_ascii_case(expected_scheme) && !parameter.is_empty()).then_some(parameter)
 }
 
-fn basic_unauthorized() -> Response {
-    let mut response = super::json_error_response(
+fn management_unauthorized() -> Response {
+    super::json_error_response(
         StatusCode::UNAUTHORIZED,
         "UNAUTHORIZED",
         "Management authentication required",
-    );
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static("Basic realm=\"Moor\", charset=\"UTF-8\""),
-    );
-    response
+    )
 }
 
 fn bearer_unauthorized() -> Response {
@@ -91,11 +171,7 @@ fn bearer_unauthorized() -> Response {
     response
 }
 
-pub async fn auth_middleware(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn origin_middleware(req: Request, next: Next) -> Response {
     let headers = req.headers();
     let host = headers
         .get(header::HOST)
@@ -103,7 +179,7 @@ pub async fn auth_middleware(
         .unwrap_or("");
     let origin = headers
         .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !origin.is_empty() && !same_origin(origin, host) {
         return super::json_error_response(
@@ -112,20 +188,39 @@ pub async fn auth_middleware(
             "Cross-origin requests are not allowed",
         );
     }
+    next.run(req).await
+}
 
-    let path = req.uri().path();
-    if path == "/api/health" {
+pub async fn management_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+    req: Request,
+    next: Next,
+) -> Response {
+    let valid_session = match session_username(&session).await {
+        Ok(username) => {
+            username.is_some_and(|username| state.management_auth.matches_username(&username))
+        }
+        Err(error) => return error.into_response(),
+    };
+    if valid_session || has_valid_basic_auth(&state, &req) {
         return next.run(req).await;
     }
-    if path == "/mcp" {
-        if !has_valid_bearer_auth(&state, &req) {
-            return bearer_unauthorized();
-        }
-    } else if !has_valid_basic_auth(&state, &req) {
-        return basic_unauthorized();
-    }
+    management_unauthorized()
+}
 
-    next.run(req).await
+pub async fn mcp_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let token = authorization_parameter(&req, "Bearer").map(str::to_owned);
+    if let Some(token) = token {
+        if state.mcp_auth.matches(&token).await {
+            return next.run(req).await;
+        }
+    }
+    bearer_unauthorized()
 }
 
 #[cfg(test)]

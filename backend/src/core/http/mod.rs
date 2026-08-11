@@ -11,8 +11,11 @@ use crate::core::services::server_manager::ServerManager;
 use axum::{http::StatusCode, middleware, response::IntoResponse, Json, Router};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
+use time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_sessions::{cookie::SameSite, Expiry, MemoryStore, SessionManagerLayer};
 
 pub struct ManagementAuth {
     username: String,
@@ -21,20 +24,45 @@ pub struct ManagementAuth {
 
 impl ManagementAuth {
     pub fn basic(username: String, password: String) -> Self {
-        Self {
-            username,
-            password,
-        }
+        Self { username, password }
+    }
+
+    pub fn matches(&self, username: &str, password: &str) -> bool {
+        self.matches_bytes(username.as_bytes(), password.as_bytes())
+    }
+
+    pub fn matches_bytes(&self, username: &[u8], password: &[u8]) -> bool {
+        let username_matches = auth::constant_time_eq(username, self.username.as_bytes());
+        let password_matches = auth::constant_time_eq(password, self.password.as_bytes());
+        username_matches & password_matches
+    }
+
+    pub fn matches_username(&self, username: &str) -> bool {
+        auth::constant_time_eq(username.as_bytes(), self.username.as_bytes())
     }
 }
 
 pub struct McpAuth {
-    token: String,
+    token: RwLock<String>,
 }
 
 impl McpAuth {
     pub fn bearer(token: String) -> Self {
-        Self { token }
+        Self {
+            token: RwLock::new(token),
+        }
+    }
+
+    pub async fn matches(&self, token: &str) -> bool {
+        auth::constant_time_eq(token.as_bytes(), self.token.read().await.as_bytes())
+    }
+
+    pub async fn reveal(&self) -> String {
+        self.token.read().await.clone()
+    }
+
+    pub async fn replace(&self, token: String) {
+        *self.token.write().await = token;
     }
 }
 
@@ -52,6 +80,10 @@ pub struct AppState {
 
 impl AppState {
     /// 生产构造函数:组装 axum 共享状态的全部协作者。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the application composition root passes each dependency explicitly"
+    )]
     pub fn new(
         db: Arc<Database>,
         management_auth: ManagementAuth,
@@ -105,12 +137,17 @@ impl AppState {
 pub fn create_app(state: Arc<AppState>) -> Router {
     let static_files = ServeDir::new(state.static_dir.clone())
         .fallback(ServeFile::new(state.static_dir.join("index.html")));
-    let mcp_routes = Router::new().route(
-        "/mcp",
-        axum::routing::any(crate::core::mcp::transport::streamable_http_server::handle_mcp_request),
-    );
+    let session_layer = SessionManagerLayer::new(MemoryStore::default())
+        .with_name("moor_session")
+        .with_http_only(true)
+        .with_same_site(SameSite::Strict)
+        .with_secure(state.public_url.starts_with("https://"))
+        .with_expiry(Expiry::OnInactivity(Duration::days(7)));
 
-    Router::new()
+    let public_routes = Router::new()
+        .merge(routes::health::public_router())
+        .merge(auth::router());
+    let management_routes = Router::new()
         .merge(routes::health::router())
         .merge(routes::servers::router())
         .merge(routes::profiles::router())
@@ -118,12 +155,30 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .merge(routes::settings::router())
         .merge(routes::events::router())
         .merge(routes::import_routes::router())
+        .merge(routes::security::router())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::management_auth_middleware,
+        ));
+    let mcp_routes = Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(
+                crate::core::mcp::transport::streamable_http_server::handle_mcp_request,
+            ),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::mcp_auth_middleware,
+        ));
+
+    Router::new()
+        .merge(public_routes)
+        .merge(management_routes)
         .merge(mcp_routes)
         .fallback_service(static_files)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::auth_middleware,
-        ))
+        .layer(middleware::from_fn(auth::origin_middleware))
+        .layer(session_layer)
         .with_state(state)
 }
 
@@ -177,7 +232,6 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/settings")
-                    .header(header::AUTHORIZATION, basic_authorization())
                     .body(Body::empty())
                     .expect("failed to build request"),
             )
@@ -185,6 +239,7 @@ mod tests {
             .expect("SPA request failed");
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("failed to read SPA response");
@@ -218,20 +273,17 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/")
+                    .uri("/api/runtime")
                     .body(Body::empty())
                     .expect("failed to build management request"),
             )
             .await
             .expect("management request failed");
         assert_eq!(management_without_auth.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            management_without_auth
-                .headers()
-                .get(header::WWW_AUTHENTICATE)
-                .and_then(|value| value.to_str().ok()),
-            Some("Basic realm=\"Moor\", charset=\"UTF-8\"")
-        );
+        assert!(management_without_auth
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .is_none());
 
         let management_with_auth = app
             .clone()
@@ -301,6 +353,230 @@ mod tests {
             .await
             .expect("authenticated MCP request failed");
         assert_eq!(mcp_with_bearer_auth.status(), StatusCode::ACCEPTED);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn login_session_grants_access_and_logout_revokes_it() {
+        let data_dir = std::env::temp_dir().join(format!("moor-login-{}", uuid::Uuid::new_v4()));
+        let static_dir = data_dir.join("dist");
+        std::fs::create_dir_all(&static_dir).expect("failed to create static directory");
+        std::fs::write(static_dir.join("index.html"), "<html>Moor SPA</html>")
+            .expect("failed to write test index");
+        let app = create_app(AppState::for_test(&data_dir));
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"username":"test","password":"test-password"}"#,
+                    ))
+                    .expect("failed to build login request"),
+            )
+            .await
+            .expect("login request failed");
+        assert_eq!(login.status(), StatusCode::OK);
+        assert_eq!(
+            login
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+        );
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("login should set session cookie")
+            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(set_cookie.contains("Max-Age=604800"));
+        let cookie = set_cookie
+            .split(';')
+            .next()
+            .expect("session cookie should contain a value")
+            .to_string();
+
+        let authenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runtime")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("failed to build authenticated request"),
+            )
+            .await
+            .expect("authenticated request failed");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("failed to build logout request"),
+            )
+            .await
+            .expect("logout request failed");
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+
+        let after_logout = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runtime")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("failed to build post-logout request"),
+            )
+            .await
+            .expect("post-logout request failed");
+        assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn invalid_login_returns_json_without_browser_challenge() {
+        let data_dir = std::env::temp_dir().join(format!("moor-login-{}", uuid::Uuid::new_v4()));
+        let app = create_app(AppState::for_test(&data_dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"username":"test","password":"wrong"}"#))
+                    .expect("failed to build invalid login request"),
+            )
+            .await
+            .expect("invalid login request failed");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_login_is_rejected() {
+        let data_dir = std::env::temp_dir().join(format!("moor-origin-{}", uuid::Uuid::new_v4()));
+        let app = create_app(AppState::for_test(&data_dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::HOST, "moor.example")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"username":"test","password":"test-password"}"#,
+                    ))
+                    .expect("failed to build cross-origin login request"),
+            )
+            .await
+            .expect("cross-origin login request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_rotates_the_mcp_bearer_credential() {
+        let data_dir = std::env::temp_dir().join(format!("moor-token-{}", uuid::Uuid::new_v4()));
+        let app = create_app(AppState::for_test(&data_dir));
+
+        let current = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/security/mcp-token")
+                    .header(header::AUTHORIZATION, basic_authorization())
+                    .body(Body::empty())
+                    .expect("failed to build token request"),
+            )
+            .await
+            .expect("token request failed");
+        assert_eq!(current.status(), StatusCode::OK);
+        assert_eq!(
+            current
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+        );
+        let current_body = axum::body::to_bytes(current.into_body(), usize::MAX)
+            .await
+            .expect("failed to read token response");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&current_body)
+                .expect("token response should be JSON")["token"],
+            "test-mcp-token",
+        );
+
+        let rotated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/security/mcp-token/rotate")
+                    .header(header::AUTHORIZATION, basic_authorization())
+                    .body(Body::empty())
+                    .expect("failed to build token rotation request"),
+            )
+            .await
+            .expect("token rotation request failed");
+        assert_eq!(rotated.status(), StatusCode::OK);
+        let rotated_body = axum::body::to_bytes(rotated.into_body(), usize::MAX)
+            .await
+            .expect("failed to read token rotation response");
+        let rotated_token = serde_json::from_slice::<serde_json::Value>(&rotated_body)
+            .expect("rotation response should be JSON")["token"]
+            .as_str()
+            .expect("rotation response should include token")
+            .to_string();
+        assert_ne!(rotated_token, "test-mcp-token");
+
+        let old_token = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, "Bearer test-mcp-token")
+                    .body(Body::from("{}"))
+                    .expect("failed to build old token request"),
+            )
+            .await
+            .expect("old token request failed");
+        assert_eq!(old_token.status(), StatusCode::UNAUTHORIZED);
+
+        let new_token = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {rotated_token}"))
+                    .body(Body::from("{}"))
+                    .expect("failed to build new token request"),
+            )
+            .await
+            .expect("new token request failed");
+        assert_eq!(new_token.status(), StatusCode::ACCEPTED);
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
