@@ -4,6 +4,16 @@
 import type { RuntimeInfo } from "@moor/types";
 import { isRecord } from "@/lib/utils";
 
+export class ApiResponseError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiResponseError";
+  }
+}
+
 export function formatApiNetworkError(path: string, err: unknown, runtime?: RuntimeInfo): string {
   const detail = err instanceof Error ? err.message : String(err);
   const target = runtime ? ` at ${runtime.baseUrl}` : "";
@@ -41,8 +51,9 @@ export async function readApiError(resp: Response): Promise<string> {
 
 export async function parseApiResponse<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
-    throw new Error(await readApiError(resp));
+    throw new ApiResponseError(await readApiError(resp), resp.status);
   }
+  if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
 }
 

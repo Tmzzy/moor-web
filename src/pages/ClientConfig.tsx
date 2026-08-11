@@ -12,6 +12,7 @@ import { Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { routes } from "@/lib/api-routes";
 import { ConverterPanel } from "@/components/converter/ConverterPanel";
+import { McpTokenPanel } from "@/components/security/McpTokenPanel";
 import type { ClientSnippet } from "@moor/types";
 
 export function ClientConfig() {
@@ -29,6 +30,8 @@ export function ClientConfig() {
         title="Client Configuration"
         subtitle="Configure your AI agents to connect to Moor"
       />
+
+      <McpTokenPanel />
 
       <Tabs
         value={activeTab}

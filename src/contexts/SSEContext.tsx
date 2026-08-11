@@ -3,6 +3,7 @@
 
 import { createContext, useContext, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { getApiRuntime, buildApiUrl, buildApiHeaders, resetRuntime } from "@/lib/api/runtime";
+import { notifyAuthenticationRequired } from "@/lib/auth-events";
 import type { MoorEvent, MoorEventData, MoorEventType, ServerStatus } from "@moor/types";
 
 interface SSEContextValue {
@@ -100,6 +101,10 @@ export function SSEProvider({ children }: { children: ReactNode }) {
           credentials: "same-origin",
           signal: controller.signal,
         });
+        if (response.status === 401) {
+          notifyAuthenticationRequired();
+          return;
+        }
         if (!response.ok || !response.body) throw new Error(`SSE failed: ${response.status}`);
 
         const reader = response.body.getReader();

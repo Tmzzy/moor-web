@@ -3,6 +3,7 @@
 
 import type { RuntimeInfo } from "@moor/types";
 import { createErrorWithCause } from "@/lib/utils";
+import { notifyAuthenticationRequired } from "@/lib/auth-events";
 import { getApiRuntime, refreshApiRuntime, buildApiUrl, buildApiHeaders } from "./runtime";
 import {
   formatApiNetworkError,
@@ -38,6 +39,7 @@ async function retryWithFreshRuntime<T>(
   const runtime = await refreshApiRuntime();
   try {
     const retryResp = await fetchWithRuntime(path, options, runtime);
+    if (retryResp.status === 401) notifyAuthenticationRequired();
     if (!retryResp.ok) {
       throw new Error(await readApiError(retryResp));
     }
@@ -65,6 +67,7 @@ export async function api<T>(path: string, options?: RequestOptions): Promise<T>
     }
     return retryWithFreshRuntime<T>(path, options, networkError);
   }
+  if (resp.status === 401) notifyAuthenticationRequired();
   return parseApiResponse<T>(resp);
 }
 

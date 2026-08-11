@@ -7,9 +7,11 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/health", get(health))
-        .route("/api/runtime", get(runtime))
+    Router::new().route("/api/runtime", get(runtime))
+}
+
+pub fn public_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/health", get(health))
 }
 
 async fn health() -> Json<Value> {
@@ -23,7 +25,8 @@ async fn runtime(State(state): State<Arc<AppState>>) -> Json<Value> {
         "mcpUrl": format!("{}/mcp", state.public_url),
         "version": state.version,
         "pid": std::process::id(),
-        "managementAuth": "basic",
+        "managementAuth": "session",
+        "managementApiAuth": ["session", "basic"],
         "mcpAuth": "bearer",
     }))
 }

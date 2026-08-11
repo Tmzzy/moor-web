@@ -49,16 +49,14 @@ fn management_auth() -> Result<core::http::ManagementAuth, String> {
     Ok(core::http::ManagementAuth::basic(username, password))
 }
 
-fn mcp_auth() -> Result<core::http::McpAuth, String> {
-    let token =
-        env::var("MOOR_MCP_TOKEN").map_err(|_| "MOOR_MCP_TOKEN is required".to_string())?;
-    if token.is_empty() {
-        return Err("MOOR_MCP_TOKEN must not be empty".to_string());
+fn mcp_token_bootstrap() -> Result<Option<String>, String> {
+    match env::var("MOOR_MCP_TOKEN") {
+        Ok(token) => Ok(Some(token)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err("MOOR_MCP_TOKEN must contain valid Unicode".to_string())
+        }
     }
-    if token.chars().any(char::is_whitespace) {
-        return Err("MOOR_MCP_TOKEN must not contain whitespace".to_string());
-    }
-    Ok(core::http::McpAuth::bearer(token))
 }
 
 fn healthcheck(port: u16) -> Result<(), String> {
@@ -116,7 +114,7 @@ async fn main() -> Result<(), String> {
     }
 
     let management_auth = management_auth()?;
-    let mcp_auth = mcp_auth()?;
+    let mcp_token_bootstrap = mcp_token_bootstrap()?;
     let host = env::var("MOOR_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
     let data_dir = data_dir();
     let static_dir = static_dir();
@@ -129,6 +127,8 @@ async fn main() -> Result<(), String> {
         .map_err(|error| format!("failed to create {}: {error}", data_dir.display()))?;
     let db = Arc::new(core::db::Database::open(&data_dir.join("moor.db"))?);
     db.run_migrations()?;
+    let mcp_token = core::services::mcp_token::initialize(&db, mcp_token_bootstrap.as_deref())?;
+    let mcp_auth = core::http::McpAuth::bearer(mcp_token);
     let settings = core::services::settings::init_settings(&db, &data_dir)?;
 
     core::db::profile_repo::ProfileRepository::new(&db).seed_default()?;
