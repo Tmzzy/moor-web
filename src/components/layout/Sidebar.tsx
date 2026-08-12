@@ -9,7 +9,10 @@ import {
   Braces,
   HelpCircle,
   Cog,
+  X,
 } from "lucide-react";
+import { useEffect } from "react";
+import { Button } from "@/components/ui/button";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -19,10 +22,15 @@ const navItems = [
   { to: "/config", label: "Client Config", icon: Braces },
 ];
 
-export function Sidebar() {
+interface SidebarContentProps {
+  onNavigate?: () => void;
+  showClose?: boolean;
+}
+
+function SidebarContent({ onNavigate, showClose = false }: SidebarContentProps) {
   return (
-    <aside className="w-[220px] shrink-0 border-r border-[var(--fg-10)] bg-surface-300 flex flex-col">
-      <div className="px-5 py-4 flex items-center gap-2.5">
+    <>
+      <div className="flex items-center gap-2.5 px-5 py-4">
         <div className="h-9 w-9 rounded-xl bg-cursor-dark flex items-center justify-center">
           <MoorLogo className="h-7 w-7 text-surface-200" />
         </div>
@@ -34,6 +42,17 @@ export function Sidebar() {
             MCP Manager
           </span>
         </div>
+        {showClose ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="ml-auto"
+            aria-label="Close navigation"
+            onClick={onNavigate}
+          >
+            <X className="h-5 w-5" />
+          </Button>
+        ) : null}
       </div>
 
       <nav className="flex-1 px-3 py-2 space-y-0.5">
@@ -41,6 +60,7 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
+            onClick={onNavigate}
             className={({ isActive }) =>
               cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-xl font-headline text-sm transition-all duration-200 relative group",
@@ -83,6 +103,7 @@ export function Sidebar() {
 
         <NavLink
           to="/settings"
+          onClick={onNavigate}
           className={({ isActive }) =>
             cn(
               "flex items-center gap-3 px-3 py-2.5 rounded-xl font-headline text-sm transition-all duration-200 relative group",
@@ -110,6 +131,48 @@ export function Sidebar() {
       <div className="px-5 py-3 border-t border-[var(--fg-08)]">
         <p className="font-mono text-[10px] text-[var(--fg-30)]">{`Moor v${__APP_VERSION__}`}</p>
       </div>
-    </aside>
+    </>
+  );
+}
+
+interface SidebarProps {
+  mobileOpen: boolean;
+  onCloseMobile: () => void;
+}
+
+export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCloseMobile();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileOpen, onCloseMobile]);
+
+  return (
+    <>
+      <aside className="hidden w-[220px] shrink-0 flex-col border-r border-[var(--fg-10)] bg-surface-300 md:flex">
+        <SidebarContent />
+      </aside>
+      {mobileOpen ? (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="absolute inset-0 bg-black/35"
+            onClick={onCloseMobile}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label="Main navigation"
+            className="relative flex h-full w-[min(280px,85vw)] flex-col border-r border-[var(--fg-10)] bg-surface-300 shadow-[0_20px_60px_rgba(0,0,0,0.2)]"
+          >
+            <SidebarContent onNavigate={onCloseMobile} showClose />
+          </aside>
+        </div>
+      ) : null}
+    </>
   );
 }

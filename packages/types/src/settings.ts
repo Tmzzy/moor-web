@@ -5,7 +5,9 @@ export type ThemeMode = "light" | "dark" | "system";
 
 export const MCP_TIMEOUT_MS_MIN = 5_000;
 export const MCP_TIMEOUT_MS_MAX = 300_000;
-export const MCP_TIMEOUT_MS_DEFAULT = 30_000;
+export const MCP_REQUEST_TIMEOUT_MS_DEFAULT = 30_000;
+export const MCP_SERVER_START_TIMEOUT_MS_DEFAULT = 120_000;
+export const MCP_TIMEOUT_MS_DEFAULT = MCP_REQUEST_TIMEOUT_MS_DEFAULT;
 
 export interface GeneralSettings {
   autoStartServersOnLaunch: boolean;
@@ -47,8 +49,8 @@ export function createDefaultSettings(): Settings {
     advanced: {
       logRetentionDays: 30,
       enableAuditLogging: true,
-      mcpRequestTimeoutMs: MCP_TIMEOUT_MS_DEFAULT,
-      mcpServerStartTimeoutMs: MCP_TIMEOUT_MS_DEFAULT,
+      mcpRequestTimeoutMs: MCP_REQUEST_TIMEOUT_MS_DEFAULT,
+      mcpServerStartTimeoutMs: MCP_SERVER_START_TIMEOUT_MS_DEFAULT,
     },
   };
 }

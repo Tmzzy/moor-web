@@ -6,9 +6,14 @@ import {
   entriesToRecordOrUndefined,
   findDuplicateHeaderKeys,
   findDuplicateKeys,
+  formToCreateInput,
   formToUpdates,
+  getEffectiveStdioCommand,
+  getStdioLauncherUpdates,
+  hasChanges,
   headerEntriesToRecordOrNull,
   headerEntriesToRecordOrUndefined,
+  inferStdioLauncher,
 } from "./server-form";
 import type { ServerUpdateInput } from "@moor/types";
 
@@ -80,6 +85,7 @@ describe("server form utilities", () => {
     const stdioUpdates: ServerUpdateInput = formToUpdates(
       {
         name: " Local ",
+        launcher: "command",
         command: " node ",
         url: "",
         args: " --stdio \n",
@@ -100,6 +106,7 @@ describe("server form utilities", () => {
     const httpUpdates: ServerUpdateInput = formToUpdates(
       {
         name: " Remote ",
+        launcher: "command",
         command: "",
         url: " https://example.com/mcp ",
         args: "",
@@ -115,5 +122,75 @@ describe("server form utilities", () => {
       headers: { authorization: "Bearer token" },
       env: null,
     });
+  });
+
+  it("builds a stdio create payload from an npx launcher preset", () => {
+    expect(
+      formToCreateInput({
+        name: " Filesystem ",
+        connectionType: "stdio",
+        launcher: "npx",
+        command: "ignored-command",
+        args: " --yes \n @modelcontextprotocol/server-filesystem \n /data ",
+        url: "",
+        env: [["ROOT", "/data"]],
+        headers: [],
+        workingDir: " /data/project ",
+        autoStart: true,
+      }),
+    ).toEqual({
+      name: "Filesystem",
+      connectionType: "stdio",
+      command: "npx",
+      args: ["--yes", "@modelcontextprotocol/server-filesystem", "/data"],
+      env: { ROOT: "/data" },
+      workingDir: "/data/project",
+      autoStart: true,
+    });
+  });
+
+  it("recognizes only exact built-in launcher commands", () => {
+    expect([
+      inferStdioLauncher("npx"),
+      inferStdioLauncher("uvx"),
+      inferStdioLauncher("/usr/local/bin/uvx"),
+    ]).toEqual(["npx", "uvx", "command"]);
+  });
+
+  it("uses launcher presets as the effective stdio command", () => {
+    expect([
+      getEffectiveStdioCommand("command", " node "),
+      getEffectiveStdioCommand("npx", "saved-command"),
+      getEffectiveStdioCommand("uvx", "saved-command"),
+    ]).toEqual(["node", "npx", "uvx"]);
+  });
+
+  it("adds non-interactive confirmation when selecting npx with empty arguments", () => {
+    expect(getStdioLauncherUpdates("npx", " \n ")).toEqual({
+      launcher: "npx",
+      args: "--yes",
+    });
+  });
+
+  it("preserves existing arguments when changing launchers", () => {
+    expect(getStdioLauncherUpdates("npx", "--package\nexample")).toEqual({
+      launcher: "npx",
+      args: "--package\nexample",
+    });
+  });
+
+  it("does not mark equivalent launcher projections dirty", () => {
+    const baseline = {
+      name: "Filesystem",
+      launcher: "npx" as const,
+      command: "npx",
+      url: "",
+      args: "--yes\n@modelcontextprotocol/server-filesystem\n/data",
+      env: [],
+      headers: [],
+      workingDir: "",
+    };
+
+    expect(hasChanges({ ...baseline, launcher: "command" }, baseline)).toBe(false);
   });
 });

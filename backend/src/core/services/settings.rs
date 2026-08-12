@@ -9,7 +9,9 @@ use std::{fs, path::Path};
 const SETTINGS_FILE: &str = "settings.json";
 pub const MCP_TIMEOUT_MS_MIN: u32 = 5_000;
 pub const MCP_TIMEOUT_MS_MAX: u32 = 300_000;
-pub const MCP_TIMEOUT_MS_DEFAULT: u32 = 30_000;
+pub const MCP_REQUEST_TIMEOUT_MS_DEFAULT: u32 = 30_000;
+pub const MCP_SERVER_START_TIMEOUT_MS_DEFAULT: u32 = 120_000;
+pub const MCP_TIMEOUT_MS_DEFAULT: u32 = MCP_REQUEST_TIMEOUT_MS_DEFAULT;
 
 /// Distinguishes client input errors (HTTP 400) from internal failures (HTTP 500).
 #[derive(Debug)]
@@ -99,7 +101,7 @@ pub fn default_settings() -> Settings {
             log_retention_days: 30,
             enable_audit_logging: true,
             mcp_request_timeout_ms: MCP_TIMEOUT_MS_DEFAULT,
-            mcp_server_start_timeout_ms: MCP_TIMEOUT_MS_DEFAULT,
+            mcp_server_start_timeout_ms: MCP_SERVER_START_TIMEOUT_MS_DEFAULT,
         },
     }
 }
@@ -411,6 +413,25 @@ mod tests {
             updated.advanced.mcp_server_start_timeout_ms,
             MCP_TIMEOUT_MS_MAX
         );
+    }
+
+    #[test]
+    fn keeps_persisted_server_start_timeout_after_default_changes() {
+        let data_dir = temp_data_dir("persisted-start-timeout");
+        let db = test_db(&data_dir);
+        init_settings(&db, &data_dir).expect("settings should initialize");
+        update_settings(
+            &db,
+            serde_json::json!({
+                "advanced": { "mcpServerStartTimeoutMs": 30_000 }
+            }),
+        )
+        .expect("start timeout should update");
+
+        let settings = get_settings(&db).expect("settings should load");
+
+        assert_eq!(settings.advanced.mcp_server_start_timeout_ms, 30_000);
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[test]

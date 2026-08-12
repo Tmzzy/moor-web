@@ -1,6 +1,31 @@
-import type { ConnectionType, ServerDetail, ServerUpdateInput } from "@moor/types";
+import type {
+  ConnectionType,
+  ServerCreateInput,
+  ServerDetail,
+  ServerUpdateInput,
+} from "@moor/types";
 
 export type KeyValueEntries = Array<[string, string]>;
+export type StdioLauncher = "command" | "npx" | "uvx";
+
+export function inferStdioLauncher(command: string): StdioLauncher {
+  if (command === "npx" || command === "uvx") return command;
+  return "command";
+}
+
+export function getEffectiveStdioCommand(launcher: StdioLauncher, command: string): string {
+  return launcher === "command" ? command.trim() : launcher;
+}
+
+export function getStdioLauncherUpdates(
+  launcher: StdioLauncher,
+  args: string,
+): { launcher: StdioLauncher; args: string } {
+  return {
+    launcher,
+    args: launcher === "npx" && !args.trim() ? "--yes" : args,
+  };
+}
 
 function entriesToRecord(
   entries: KeyValueEntries,
@@ -103,6 +128,7 @@ export function findDuplicateHeaderKeys(entries: KeyValueEntries): Set<number> {
 
 export interface EditForm {
   name: string;
+  launcher: StdioLauncher;
   command: string;
   url: string;
   args: string;
@@ -111,10 +137,43 @@ export interface EditForm {
   workingDir: string;
 }
 
+export interface CreateForm extends EditForm {
+  connectionType: ConnectionType;
+  autoStart: boolean;
+}
+
+export function formToCreateInput(form: CreateForm): ServerCreateInput {
+  const base = {
+    name: form.name.trim(),
+    connectionType: form.connectionType,
+    autoStart: form.autoStart,
+    env: entriesToRecordOrUndefined(form.env),
+  };
+
+  if (form.connectionType === "stdio") {
+    return {
+      ...base,
+      connectionType: "stdio",
+      command: getEffectiveStdioCommand(form.launcher, form.command),
+      args: argsToArrayOrUndefined(form.args),
+      workingDir: form.workingDir.trim() || undefined,
+    };
+  }
+
+  return {
+    ...base,
+    connectionType: "http",
+    url: form.url.trim(),
+    headers: headerEntriesToRecordOrUndefined(form.headers),
+  };
+}
+
 export function serverToForm(server: ServerDetail): EditForm {
+  const command = server.command ?? "";
   return {
     name: server.name ?? "",
-    command: server.command ?? "",
+    launcher: inferStdioLauncher(command),
+    command,
     url: server.url ?? "",
     args: server.args?.join("\n") ?? "",
     env: server.env ? Object.entries(server.env) : [],
@@ -125,7 +184,9 @@ export function serverToForm(server: ServerDetail): EditForm {
 
 export function validateEditForm(form: EditForm, connectionType: ConnectionType): string | null {
   if (!form.name.trim()) return "Name is required.";
-  if (connectionType === "stdio" && !form.command.trim()) return "Command is required.";
+  if (connectionType === "stdio" && !getEffectiveStdioCommand(form.launcher, form.command)) {
+    return "Command is required.";
+  }
   if (connectionType === "http" && !form.url.trim()) return "URL is required.";
   if (findDuplicateKeys(form.env).size > 0) return "Environment variable keys must be unique.";
   if (connectionType === "http" && findDuplicateHeaderKeys(form.headers).size > 0) {
@@ -139,7 +200,7 @@ export function formToUpdates(form: EditForm, connectionType: ConnectionType): S
   const env = entriesToRecordOrNull(form.env);
 
   if (connectionType === "stdio") {
-    updates.command = form.command.trim();
+    updates.command = getEffectiveStdioCommand(form.launcher, form.command);
     updates.args = argsToArrayOrNull(form.args);
     updates.env = env;
     updates.workingDir = form.workingDir.trim() || null;
@@ -172,7 +233,8 @@ function stableArgs(args: string): string[] {
 export function hasChanges(form: EditForm, baseline: EditForm): boolean {
   return (
     form.name.trim() !== baseline.name.trim() ||
-    form.command.trim() !== baseline.command.trim() ||
+    getEffectiveStdioCommand(form.launcher, form.command) !==
+      getEffectiveStdioCommand(baseline.launcher, baseline.command) ||
     form.url.trim() !== baseline.url.trim() ||
     form.workingDir.trim() !== baseline.workingDir.trim() ||
     JSON.stringify(stableArgs(form.args)) !== JSON.stringify(stableArgs(baseline.args)) ||

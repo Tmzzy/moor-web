@@ -162,7 +162,7 @@ docker compose up -d
 
 ## 数据与备份
 
-Moor 数据保存在 `/data/moor.db`。数据库包含 Server 配置、设置、审计日志和可恢复的 MCP Token，应把整个数据卷视为敏感数据。
+Moor 数据保存在 `/data/moor.db`。数据库包含 Server 配置、设置、审计日志和可恢复的 MCP Token，应把整个数据卷视为敏感数据。Node.js 和 Python stdio Server 首次运行后，`/data/runtime` 还会保存 npm/uv 缓存、uv 管理的 Python 与工具环境；这些运行时数据可以重新下载，但会增加数据卷和备份体积。
 
 备份前可以停止容器，或同时保存 SQLite 的 `moor.db`、`moor.db-wal` 和 `moor.db-shm`：
 
@@ -174,7 +174,37 @@ docker compose start moor
 
 ## MCP Server 运行时
 
-官方镜像只包含 Moor Rust 服务和 CA 证书，不包含 Node.js、Python、uv 或其他 stdio 运行时。远程 HTTP MCP Server 可直接使用；如需运行 stdio Server，应基于官方镜像构建派生镜像并安装对应命令和运行时。
+官方镜像包含 Node.js 24、npm/npx 和 uv/uvx，可直接运行 Node.js 或 Python 包形式的 stdio MCP Server。镜像不预装 system Python；`uvx` 第一次运行 Python 工具时会按需下载 uv-managed Python。下载的 Python、工具环境和包缓存都保存在 `/data/runtime`，后续启动会复用数据卷中的内容。
+
+添加 Node.js MCP Server 时，Transport 选择 `stdio`、Launcher 选择 `npx`。对应的底层配置仍然是标准 stdio 配置：
+
+```json
+{
+  "connectionType": "stdio",
+  "command": "npx",
+  "args": [
+    "--yes",
+    "@modelcontextprotocol/server-filesystem",
+    "/data"
+  ]
+}
+```
+
+添加 Python MCP Server 时，Launcher 选择 `uvx`：
+
+```json
+{
+  "connectionType": "stdio",
+  "command": "uvx",
+  "args": ["--with", "mcp<2", "mcp-server-fetch"]
+}
+```
+
+这里对 `mcp` 使用 `<2` 约束，是因为当前 `mcp-server-fetch` 仍使用 MCP Python SDK 1.x API。其他已经适配 SDK 2.x 的 Python Server 不需要这个约束；Moor 会把参数原样交给 `uvx`。
+
+首次下载需要容器能够访问对应的 npm、PyPI、GitHub/Astral 下载源，耗时也会高于缓存后的启动。新部署的 MCP Server 启动超时默认为 120 秒；升级部署会保留数据库中已有的超时值，可在 **Settings > Advanced > Server Start Timeout** 中调整。
+
+`npx` 和 `uvx` 可以下载并执行任意第三方代码。stdio 子进程与 `moor-server` 使用相同的 `moor` 用户，继承 Moor 的运行环境，并可以访问 `/data` 和容器网络。因此只有受信任的管理员才能添加或修改 Server，包名和版本也应由管理员审核。当前运行模型面向自托管单管理员场景，不提供多租户沙箱、包白名单或 Marketplace 隔离。
 
 ## 本地开发
 

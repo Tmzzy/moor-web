@@ -79,6 +79,7 @@ mod tests {
             .await
             .expect("settings should load");
         assert_eq!(value["advanced"]["mcpRequestTimeoutMs"], 30_000);
+        assert_eq!(value["advanced"]["mcpServerStartTimeoutMs"], 120_000);
         assert_eq!(value["general"]["autoStartServersOnLaunch"], false);
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -103,6 +104,7 @@ mod tests {
             .await
             .expect("settings reset should succeed");
         assert_eq!(value["advanced"]["mcpRequestTimeoutMs"], 30_000);
+        assert_eq!(value["advanced"]["mcpServerStartTimeoutMs"], 120_000);
         assert_eq!(
             settings_store::get_settings(&state.db)
                 .expect("settings should load")

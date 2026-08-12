@@ -352,7 +352,7 @@ impl ServerManager {
             }
         }
         let timeout_ms = start_timeout_ms
-            .unwrap_or(settings::MCP_TIMEOUT_MS_DEFAULT)
+            .unwrap_or(settings::MCP_SERVER_START_TIMEOUT_MS_DEFAULT)
             .saturating_add(1_000);
         Err(format!(
             "Server start wait timed out after {}",
@@ -553,7 +553,7 @@ impl ServerManager {
             })
             .unwrap_or(ServerTimeouts {
                 request_ms: settings::MCP_TIMEOUT_MS_DEFAULT,
-                start_ms: settings::MCP_TIMEOUT_MS_DEFAULT,
+                start_ms: settings::MCP_SERVER_START_TIMEOUT_MS_DEFAULT,
             })
     }
 }
