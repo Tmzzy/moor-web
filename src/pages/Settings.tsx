@@ -379,7 +379,7 @@ export function SettingsPage() {
 
       {loadState.canRenderControls && (
         <div className="flex flex-col gap-4 md:flex-row md:gap-6">
-          <nav className="grid shrink-0 grid-cols-3 gap-1 md:w-44 md:grid-cols-1">
+          <nav className="grid shrink-0 grid-cols-3 gap-1 md:w-44 md:self-start md:grid-cols-1">
             {groups.map(({ key, label, icon }) => (
               <GroupNavItem
                 key={key}
