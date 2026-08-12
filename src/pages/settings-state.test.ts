@@ -3,7 +3,14 @@
 
 import { describe, expect, it } from "vite-plus/test";
 import { getSettingsPageLoadState, parseTimeoutSecondsInput } from "./settings-state";
-import { MCP_TIMEOUT_MS_MAX, MCP_TIMEOUT_MS_MIN } from "@moor/types";
+import {
+  createDefaultSettings,
+  MCP_REQUEST_TIMEOUT_MS_DEFAULT,
+  MCP_SERVER_START_TIMEOUT_MS_DEFAULT,
+  MCP_TIMEOUT_MS_DEFAULT,
+  MCP_TIMEOUT_MS_MAX,
+  MCP_TIMEOUT_MS_MIN,
+} from "@moor/types";
 
 describe("settings page state helpers", () => {
   it("blocks settings controls when the settings query failed", () => {
@@ -45,5 +52,15 @@ describe("settings page state helpers", () => {
       valid: false,
       message: "Enter a whole number between 5 and 300.",
     });
+  });
+
+  it("keeps request and server-start timeout defaults independent", () => {
+    const defaults = createDefaultSettings();
+
+    expect(defaults.advanced).toMatchObject({
+      mcpRequestTimeoutMs: MCP_REQUEST_TIMEOUT_MS_DEFAULT,
+      mcpServerStartTimeoutMs: MCP_SERVER_START_TIMEOUT_MS_DEFAULT,
+    });
+    expect(MCP_TIMEOUT_MS_DEFAULT).toBe(MCP_REQUEST_TIMEOUT_MS_DEFAULT);
   });
 });

@@ -1,11 +1,15 @@
 import { useProfiles } from "@/hooks/useProfiles";
-import { ChevronDown, Check, Loader2, LogOut } from "lucide-react";
+import { ChevronDown, Check, Loader2, LogOut, Menu } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
 
-export function Header() {
+interface HeaderProps {
+  onOpenNavigation: () => void;
+}
+
+export function Header({ onOpenNavigation }: HeaderProps) {
   const { profiles, activateProfile } = useProfiles();
   const { username, logout } = useAuth();
   const [open, setOpen] = useState(false);
@@ -32,14 +36,25 @@ export function Header() {
   }, []);
 
   return (
-    <header className="h-14 border-b border-[var(--fg-08)] bg-surface-200/80 backdrop-blur-md flex items-center justify-between px-6 sticky top-0 z-40">
+    <header className="h-14 border-b border-[var(--fg-08)] bg-surface-200/80 backdrop-blur-md flex items-center justify-between px-2 sm:px-4 md:px-6 sticky top-0 z-40">
       <div className="flex min-w-0 items-center gap-2">
-        <span className="font-body text-sm text-[var(--fg-40)]">Active Profile</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 md:hidden"
+          aria-label="Open navigation"
+          onClick={onOpenNavigation}
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <span className="hidden font-body text-sm text-[var(--fg-40)] sm:inline">
+          Active Profile
+        </span>
         <div className="relative" ref={ref}>
           <button
             onClick={() => setOpen(!open)}
             className={cn(
-              "flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-200 font-headline text-sm",
+              "flex max-w-36 items-center gap-2 rounded-xl px-3 py-1.5 font-headline text-sm transition-all duration-200 sm:max-w-48",
               open
                 ? "bg-surface-400 text-cursor-dark shadow-sm"
                 : "bg-surface-300 hover:bg-surface-400 text-cursor-dark",
@@ -49,7 +64,7 @@ export function Header() {
               <span className="animate-ping-slow absolute inline-flex h-full w-full rounded-full bg-success-muted opacity-60" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-success-muted" />
             </span>
-            {activeProfile?.name || "None"}
+            <span className="truncate">{activeProfile?.name || "None"}</span>
             <ChevronDown
               className={cn(
                 "h-3.5 w-3.5 text-[var(--fg-35)] transition-transform duration-200",
@@ -85,27 +100,26 @@ export function Header() {
           )}
         </div>
       </div>
-      <div className="ml-4 flex min-w-0 items-center gap-2 border-l border-[var(--fg-08)] pl-4">
+      <div className="ml-2 flex min-w-0 items-center gap-1 border-l border-[var(--fg-08)] pl-2 sm:ml-4 sm:gap-2 sm:pl-4">
         <span
-          className="max-w-36 truncate font-headline text-xs text-[var(--fg-45)]"
+          className="hidden max-w-36 truncate font-headline text-xs text-[var(--fg-45)] sm:block"
           title={username ?? undefined}
         >
           {username}
         </span>
         <Button
           variant="ghost"
-          size="sm"
+          size="icon"
           type="button"
           disabled={loggingOut}
           aria-label="Sign out"
           onClick={() => void handleLogout()}
         >
           {loggingOut ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
-            <LogOut className="mr-2 h-4 w-4" />
+            <LogOut className="h-4 w-4" />
           )}
-          Sign out
         </Button>
       </div>
     </header>

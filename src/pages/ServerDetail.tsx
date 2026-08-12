@@ -2,7 +2,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/shared/StatusBadge";
@@ -13,6 +12,7 @@ import { KeyValueEditor } from "@/components/shared/KeyValueEditor";
 import { CopyButton } from "@/components/shared/CopyButton";
 import { UnsavedChangesDialog } from "@/components/shared/UnsavedChangesDialog";
 import { ToolCategoryBadge } from "@/components/shared/ToolCategoryBadge";
+import { StdioConfigFields } from "@/components/servers/StdioConfigFields";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Play, Square, RefreshCw, Terminal, Pencil, X, Check } from "lucide-react";
 import { useProfiles } from "@/hooks/useProfiles";
@@ -31,14 +31,19 @@ interface ServerEditFieldsProps {
 export function ServerEditFields({ form, connectionType, onChange }: ServerEditFieldsProps) {
   return (
     <>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label>Name</Label>
-          <Input value={form.name} onChange={(e) => onChange({ ...form, name: e.target.value })} />
+          <Label htmlFor="edit-server-name">Name</Label>
+          <Input
+            id="edit-server-name"
+            value={form.name}
+            onChange={(e) => onChange({ ...form, name: e.target.value })}
+          />
         </div>
         <div className="space-y-1.5">
-          <Label>Connection Type</Label>
+          <Label htmlFor="edit-server-transport">Connection Type</Label>
           <Input
+            id="edit-server-transport"
             value={connectionType}
             readOnly
             aria-disabled="true"
@@ -48,38 +53,20 @@ export function ServerEditFields({ form, connectionType, onChange }: ServerEditF
         </div>
       </div>
       {connectionType === "stdio" ? (
-        <>
-          <div className="space-y-1.5">
-            <Label>Command</Label>
-            <Input
-              placeholder="e.g., npx -y @modelcontextprotocol/server-github"
-              value={form.command}
-              onChange={(e) => onChange({ ...form, command: e.target.value })}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Arguments (one per line)</Label>
-            <Textarea
-              placeholder={"-y\n@modelcontextprotocol/server-github"}
-              value={form.args}
-              onChange={(e) => onChange({ ...form, args: e.target.value })}
-              className="min-h-[80px] font-mono text-xs"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Working Directory</Label>
-            <Input
-              placeholder="e.g., /path/to/project"
-              value={form.workingDir}
-              onChange={(e) => onChange({ ...form, workingDir: e.target.value })}
-            />
-          </div>
-        </>
+        <StdioConfigFields
+          idPrefix="edit-server"
+          launcher={form.launcher}
+          command={form.command}
+          args={form.args}
+          workingDir={form.workingDir}
+          onChange={(updates) => onChange({ ...form, ...updates })}
+        />
       ) : (
         <>
           <div className="space-y-1.5">
-            <Label>URL</Label>
+            <Label htmlFor="edit-server-url">URL</Label>
             <Input
+              id="edit-server-url"
               placeholder="e.g., http://localhost:3000/mcp"
               value={form.url}
               onChange={(e) => onChange({ ...form, url: e.target.value })}

@@ -6,6 +6,7 @@ import { ToolCategoryBadge } from "@/components/shared/ToolCategoryBadge";
 
 const baseForm: EditForm = {
   name: "Create Tools",
+  launcher: "command",
   command: "node",
   url: "",
   args: "server.js",

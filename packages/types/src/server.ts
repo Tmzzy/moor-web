@@ -32,6 +32,18 @@ export interface ServerDetail extends Server {
   runtime: ServerRuntime;
 }
 
+export interface ServerCreateInput {
+  name: string;
+  connectionType: ConnectionType;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  workingDir?: string;
+  autoStart?: boolean;
+}
+
 export interface ServerUpdateInput {
   name?: string;
   command?: string;

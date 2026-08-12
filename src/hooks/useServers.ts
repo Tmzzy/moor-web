@@ -4,7 +4,13 @@ import { api, apiPost, apiPut, apiDelete } from "@/lib/api/client";
 import { routes } from "@/lib/api-routes";
 import { serverKeys } from "@/lib/query-keys";
 import { useSSEEvent } from "@/contexts/SSEContext";
-import type { Server, ServerDetail, ServerUpdateInput, ToolDetail } from "@moor/types";
+import type {
+  Server,
+  ServerCreateInput,
+  ServerDetail,
+  ServerUpdateInput,
+  ToolDetail,
+} from "@moor/types";
 import { getErrorMessage } from "@/lib/utils";
 import {
   applyServerAction,
@@ -121,16 +127,7 @@ export function useServerActions(callbacks?: {
   );
 
   const addServer = useMutation({
-    mutationFn: async (config: {
-      name: string;
-      connectionType: "stdio" | "http";
-      command?: string;
-      args?: string[];
-      url?: string;
-      env?: Record<string, string>;
-      headers?: Record<string, string>;
-      autoStart?: boolean;
-    }) => {
+    mutationFn: async (config: ServerCreateInput) => {
       return apiPost<Server>(routes.servers.create(), config);
     },
     onSuccess: (server) => {

@@ -54,6 +54,98 @@ jobs:
       - name: Verify backend
         run: cargo test --locked --manifest-path backend/Cargo.toml
 
+      - name: Build runtime smoke image
+        run: docker build --tag moor-runtime-smoke .
+
+      - name: Verify bundled runtimes and writable storage
+        run: |
+          docker run --rm --entrypoint /bin/sh moor-runtime-smoke -ec '
+            test "$(id -u)" = "10001"
+            test "$(id -g)" = "10001"
+            test "$HOME" = "/data/runtime/home"
+            test "$(node --version | cut -d. -f1)" = "v24"
+            case "$(uv --version)" in "uv 0.12.3 "*) ;; *) exit 1 ;; esac
+            ! command -v python3 >/dev/null
+            for command in node npm npx uv uvx; do command -v "$command" >/dev/null; done
+            for directory in \
+              "$HOME" \
+              "$XDG_CACHE_HOME" \
+              "$XDG_CONFIG_HOME" \
+              "$XDG_DATA_HOME" \
+              "$NPM_CONFIG_CACHE" \
+              "$UV_CACHE_DIR" \
+              "$UV_PYTHON_INSTALL_DIR" \
+              "$UV_PYTHON_BIN_DIR" \
+              "$UV_TOOL_DIR" \
+              "$UV_TOOL_BIN_DIR"; do
+              touch "$directory/.moor-write-test"
+              rm "$directory/.moor-write-test"
+            done
+            uv python install 3.12
+            python3.12 -c "import sys; assert sys.version_info[:2] == (3, 12)"
+          '
+
+      - name: Verify existing data volume upgrade
+        run: |
+          volume=moor-old-volume-smoke
+          container=moor-old-volume-smoke
+          cleanup() {
+            docker rm --force "$container" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker volume create "$volume"
+          docker run --rm \
+            --user 0:0 \
+            --volume "$volume:/legacy" \
+            --entrypoint /bin/sh \
+            moor-runtime-smoke -ec '
+              touch /legacy/existing-marker
+              chown -R 10001:10001 /legacy
+            '
+
+          docker run --detach \
+            --name "$container" \
+            --volume "$volume:/data" \
+            --env MOOR_PASSWORD=runtime-smoke-password \
+            --health-interval=1s \
+            --health-timeout=5s \
+            --health-start-period=1s \
+            --health-retries=30 \
+            moor-runtime-smoke
+
+          status=starting
+          for _ in $(seq 1 30); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
+            test "$status" != unhealthy || break
+            test "$status" != healthy || break
+            sleep 1
+          done
+          if test "$status" != healthy; then
+            docker logs "$container"
+            exit 1
+          fi
+
+          docker exec "$container" /bin/sh -ec '
+            test -f /data/existing-marker
+            for directory in \
+              "$HOME" \
+              "$XDG_CACHE_HOME" \
+              "$XDG_CONFIG_HOME" \
+              "$XDG_DATA_HOME" \
+              "$NPM_CONFIG_CACHE" \
+              "$UV_CACHE_DIR" \
+              "$UV_PYTHON_INSTALL_DIR" \
+              "$UV_PYTHON_BIN_DIR" \
+              "$UV_TOOL_DIR" \
+              "$UV_TOOL_BIN_DIR"; do
+              test -d "$directory"
+              touch "$directory/.moor-upgrade-write-test"
+              rm "$directory/.moor-upgrade-write-test"
+            done
+          '
+
   publish:
     needs: verify
     runs-on: ubuntu-latest
