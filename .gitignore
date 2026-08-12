@@ -62,3 +62,4 @@ docs/specs/*
 backend/target/
 data/
 .gitnexus
+/.vscode-ai-images/
