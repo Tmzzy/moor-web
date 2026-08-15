@@ -21,7 +21,12 @@ import { routes } from "@/lib/api-routes";
 
 type BusyAction = "reveal" | "copy" | "rotate" | null;
 
-export function McpTokenPanel() {
+interface McpTokenPanelProps {
+  profileId: string;
+  profileName: string;
+}
+
+export function McpTokenPanel({ profileId, profileName }: McpTokenPanelProps) {
   const [token, setToken] = useState<string | null>(null);
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState<BusyAction>(null);
@@ -30,7 +35,7 @@ export function McpTokenPanel() {
 
   const loadToken = async (): Promise<string> => {
     if (token) return token;
-    const response = await api<McpTokenResponse>(routes.security.mcpToken());
+    const response = await api<McpTokenResponse>(routes.profiles.mcpToken(profileId));
     setToken(response.token);
     return response.token;
   };
@@ -58,7 +63,7 @@ export function McpTokenPanel() {
     try {
       const currentToken = await loadToken();
       await navigator.clipboard.writeText(currentToken);
-      toast.success("MCP token copied");
+      toast.success("Profile token copied");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to copy the token.");
     } finally {
@@ -70,13 +75,13 @@ export function McpTokenPanel() {
     setBusy("rotate");
     setError(null);
     try {
-      const response = await api<McpTokenResponse>(routes.security.rotateMcpToken(), {
+      const response = await api<McpTokenResponse>(routes.profiles.rotateMcpToken(profileId), {
         method: "POST",
       });
       setToken(response.token);
       setVisible(true);
       setRotateOpen(false);
-      toast.success("MCP token rotated", {
+      toast.success("Profile token rotated", {
         description: "Update connected clients before their next request.",
       });
     } catch (requestError) {
@@ -100,11 +105,8 @@ export function McpTokenPanel() {
               </div>
               <div className="min-w-0">
                 <h2 className="font-headline text-sm font-semibold text-cursor-dark">
-                  MCP Access Token
+                  {profileName} Token
                 </h2>
-                <p className="font-body text-xs text-[var(--fg-50)]">
-                  Used by clients that connect to the public MCP endpoint.
-                </p>
               </div>
             </div>
 
@@ -121,6 +123,7 @@ export function McpTokenPanel() {
                 type="button"
                 variant="outline"
                 size="icon"
+                className="h-11 w-11 shrink-0"
                 disabled={busy !== null}
                 aria-label={visible ? "Hide MCP token" : "Show MCP token"}
                 title={visible ? "Hide token" : "Show token"}
@@ -138,6 +141,7 @@ export function McpTokenPanel() {
                 type="button"
                 variant="outline"
                 size="icon"
+                className="h-11 w-11 shrink-0"
                 disabled={busy !== null}
                 aria-label="Copy MCP token"
                 title="Copy token"
@@ -156,7 +160,7 @@ export function McpTokenPanel() {
             type="button"
             variant="outline"
             disabled={busy !== null}
-            className="w-full shrink-0 lg:w-auto"
+            className="min-h-11 w-full shrink-0 lg:w-auto"
             onClick={() => setRotateOpen(true)}
           >
             <RefreshCw className="mr-2 h-4 w-4" />
@@ -172,8 +176,8 @@ export function McpTokenPanel() {
           <AlertDialogHeader>
             <AlertDialogTitle>Rotate MCP access token?</AlertDialogTitle>
             <AlertDialogDescription>
-              The current token will stop working immediately. Every connected client must be
-              updated with the new value.
+              The current token will stop working immediately. Every connected client using this
+              token must be updated with the new value.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

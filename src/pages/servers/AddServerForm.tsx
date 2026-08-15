@@ -8,6 +8,7 @@ import { ErrorBanner } from "@/components/shared/ErrorBanner";
 import { Switch } from "@/components/ui/switch";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { StdioConfigFields } from "@/components/servers/StdioConfigFields";
+import { ProfileSelector } from "@/components/servers/ProfileSelector";
 import { KeyValueEditor } from "@/components/shared/KeyValueEditor";
 import { UnsavedChangesDialog } from "@/components/shared/UnsavedChangesDialog";
 import {
@@ -18,6 +19,7 @@ import {
   type StdioLauncher,
 } from "@/lib/server-form";
 import type { ConnectionType, ServerCreateInput } from "@moor/types";
+import { useProfiles } from "@/hooks/useProfiles";
 
 const CONNECTION_TYPES = [
   { value: "stdio", label: "stdio" },
@@ -45,15 +47,22 @@ interface AddServerFormProps {
 }
 
 export function AddServerForm({ onAdd, onClose }: AddServerFormProps) {
+  const { profiles } = useProfiles();
   const [form, setForm] = useState(createInitialForm);
+  const [profileSelection, setProfileSelection] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const baselineRef = useRef(createInitialForm());
-  const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(baselineRef.current), [form]);
+  const profileSelectionDirty = profileSelection.length > 0;
+  const dirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(baselineRef.current) || profileSelectionDirty,
+    [form, profileSelectionDirty],
+  );
   const effectiveCommand = getEffectiveStdioCommand(form.launcher, form.command);
   const canSubmit =
     Boolean(form.name.trim()) &&
+    profileSelection.length > 0 &&
     (form.connectionType === "stdio" ? Boolean(effectiveCommand) : Boolean(form.url.trim()));
 
   const requestClose = () => {
@@ -76,6 +85,10 @@ export function AddServerForm({ onAdd, onClose }: AddServerFormProps) {
       setFormError("URL is required.");
       return;
     }
+    if (profileSelection.length === 0) {
+      setFormError("Select at least one profile.");
+      return;
+    }
 
     if (findDuplicateKeys(form.env).size > 0) {
       setFormError("Environment variable keys must be unique.");
@@ -88,7 +101,7 @@ export function AddServerForm({ onAdd, onClose }: AddServerFormProps) {
 
     setSubmitting(true);
     try {
-      await onAdd(formToCreateInput(form));
+      await onAdd({ ...formToCreateInput(form), profileIds: profileSelection });
       onClose();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to add server");
@@ -171,6 +184,11 @@ export function AddServerForm({ onAdd, onClose }: AddServerFormProps) {
             </div>
           </>
         )}
+        <ProfileSelector
+          profiles={profiles}
+          selectedIds={profileSelection}
+          onChange={setProfileSelection}
+        />
         <div className="flex items-center justify-between py-2">
           <div className="space-y-0.5">
             <Label>Auto Start</Label>

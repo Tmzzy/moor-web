@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -13,14 +14,33 @@ import { CopyButton } from "@/components/shared/CopyButton";
 import { UnsavedChangesDialog } from "@/components/shared/UnsavedChangesDialog";
 import { ToolCategoryBadge } from "@/components/shared/ToolCategoryBadge";
 import { StdioConfigFields } from "@/components/servers/StdioConfigFields";
+import { ProfileSelector } from "@/components/servers/ProfileSelector";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Play, Square, RefreshCw, Terminal, Pencil, X, Check } from "lucide-react";
+import {
+  ArrowLeft,
+  Play,
+  Square,
+  RefreshCw,
+  Terminal,
+  Pencil,
+  X,
+  Check,
+  Users,
+} from "lucide-react";
 import { useProfiles } from "@/hooks/useProfiles";
 import { useServerActions, useServer, useServerTools } from "@/hooks/useServers";
 import { useEditSession } from "@/hooks/useEditSession";
 import { findDuplicateHeaderKeys, type EditForm } from "@/lib/server-form";
 import { cn } from "@/lib/utils";
 import type { ConnectionType } from "@moor/types";
+import { toast } from "sonner";
 
 interface ServerEditFieldsProps {
   form: EditForm;
@@ -102,12 +122,16 @@ export function ServerEditFields({ form, connectionType, onChange }: ServerEditF
 export function ServerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { startServer, stopServer, updateServer } = useServerActions();
+  const { startServer, stopServer, updateServer, updateServerProfiles } = useServerActions();
   const { profiles, updateProfileServer } = useProfiles();
-  const activeProfile = profiles.find((profile) => profile.isActive);
+  const [toolProfileId, setToolProfileId] = useState<string>();
+  const [savingProfiles, setSavingProfiles] = useState(false);
 
   const { server, isLoading: loading } = useServer(id);
-  const { tools, refresh: refreshTools } = useServerTools(id, activeProfile?.id);
+  const assignedProfileIds = new Set(server?.profileIds ?? []);
+  const assignedProfiles = profiles.filter((profile) => assignedProfileIds.has(profile.id));
+  const toolProfile = assignedProfiles.find((profile) => profile.id === toolProfileId);
+  const { tools, refresh: refreshTools } = useServerTools(id, toolProfile?.id);
 
   const {
     isEditing,
@@ -142,7 +166,7 @@ export function ServerDetail() {
   };
 
   const toggleTool = async (toolName: string, enabled: boolean) => {
-    if (!activeProfile || !id) return;
+    if (!toolProfile || !id) return;
     const disabledTools = new Set(
       tools.filter((tool) => tool.disabled).map((tool) => tool.toolName),
     );
@@ -152,11 +176,25 @@ export function ServerDetail() {
       disabledTools.add(toolName);
     }
     await updateProfileServer({
-      profileId: activeProfile.id,
+      profileId: toolProfile.id,
       serverId: id,
       updates: { disabledTools: Array.from(disabledTools) },
     });
     refreshTools();
+  };
+
+  const updateProfiles = async (profileIds: string[]) => {
+    if (!id || savingProfiles) return;
+    setSavingProfiles(true);
+    try {
+      await updateServerProfiles({ id, profileIds });
+    } catch (error) {
+      toast.error("Profile access update failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setSavingProfiles(false);
+    }
   };
 
   const toggleAutoStart = async (value: boolean) => {
@@ -193,7 +231,7 @@ export function ServerDetail() {
       />
 
       {/* Header */}
-      <div className="flex items-start gap-3">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 sm:flex">
         <Button variant="ghost" size="icon" className="mt-0.5" onClick={() => navigate("/servers")}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
@@ -224,7 +262,7 @@ export function ServerDetail() {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="col-span-2 flex shrink-0 items-center justify-end gap-2 sm:col-span-1 sm:justify-start">
           {isEditing ? (
             <>
               <Button variant="outline" onClick={requestCancelEdit}>
@@ -348,21 +386,58 @@ export function ServerDetail() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Users className="h-4 w-4 text-[var(--fg-40)]" /> Profile Access
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ProfileSelector
+            profiles={profiles}
+            selectedIds={server.profileIds}
+            onChange={(profileIds) => void updateProfiles(profileIds)}
+            disabled={savingProfiles}
+          />
+        </CardContent>
+      </Card>
+
       {/* Tools */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
               <CardTitle className="text-base">Discovered Tools</CardTitle>
               <Badge variant="subtle">{tools.length}</Badge>
             </div>
-            <Button variant="ghost" size="sm" onClick={handleDiscoverTools}>
-              <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Refresh
-            </Button>
+            <div className="flex min-w-0 items-center gap-2">
+              {assignedProfiles.length > 0 ? (
+                <Select value={toolProfile?.id} onValueChange={setToolProfileId}>
+                  <SelectTrigger className="h-9 min-w-0 flex-1 sm:w-44" aria-label="Tool profile">
+                    <SelectValue placeholder="Select profile" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {assignedProfiles.map((profile) => (
+                      <SelectItem key={profile.id} value={profile.id}>
+                        {profile.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+              <Button variant="ghost" size="sm" onClick={handleDiscoverTools}>
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Refresh
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
-          {tools.length === 0 ? (
+          {!toolProfile ? (
+            <EmptyState
+              icon={Users}
+              message={assignedProfiles.length > 0 ? "No profile selected" : "No profiles assigned"}
+            />
+          ) : tools.length === 0 ? (
             <EmptyState
               icon={Terminal}
               message="No tools discovered. Start the server to discover tools."
@@ -394,7 +469,7 @@ export function ServerDetail() {
                   </div>
                   <Switch
                     checked={!tool.disabled}
-                    disabled={!activeProfile}
+                    disabled={!toolProfile}
                     onCheckedChange={(v) => toggleTool(tool.toolName, v)}
                   />
                 </div>

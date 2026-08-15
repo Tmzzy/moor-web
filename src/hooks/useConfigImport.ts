@@ -4,7 +4,12 @@ import { apiPost } from "@/lib/api/client";
 import { routes } from "@/lib/api-routes";
 import { serverKeys } from "@/lib/query-keys";
 import { formatJsonImport, getJsonImportDiagnostics } from "@/lib/json-import-editor";
-import type { ScannedServer, ImportPreview as ImportPreviewType } from "@moor/types";
+import type {
+  ExecuteImportInput,
+  ExecuteImportResult,
+  ScannedServer,
+  ImportPreview as ImportPreviewType,
+} from "@moor/types";
 
 type ImportPreview = ImportPreviewType;
 
@@ -13,6 +18,7 @@ export function useConfigImport() {
 
   const [scanCandidates, setScanCandidates] = useState<ScannedServer[]>([]);
   const [selectedImports, setSelectedImports] = useState<Set<string>>(new Set());
+  const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([]);
   const [scanStatus, setScanStatus] = useState<string | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
 
@@ -25,6 +31,7 @@ export function useConfigImport() {
     setImportPreview(result);
     setScanCandidates(result.servers);
     setSelectedImports(new Set(result.servers.map((server) => server.name)));
+    setSelectedProfileIds([]);
     setScanStatus(
       result.newServers === 0 ? `Scanned ${result.scanned} configs. No new servers found.` : null,
     );
@@ -90,10 +97,11 @@ export function useConfigImport() {
   const executeImportMutation = useMutation({
     mutationFn: async () => {
       const serversToImport = scanCandidates.filter((server) => selectedImports.has(server.name));
-      const result = await apiPost<{ imported: string[]; skipped: string[] }>(
-        routes.import.execute(),
-        { servers: serversToImport },
-      );
+      const input: ExecuteImportInput = {
+        servers: serversToImport,
+        profileIds: selectedProfileIds,
+      };
+      const result = await apiPost<ExecuteImportResult>(routes.import.execute(), input);
       return result;
     },
     onSuccess: (result) => {
@@ -102,6 +110,7 @@ export function useConfigImport() {
       );
       setScanCandidates([]);
       setSelectedImports(new Set());
+      setSelectedProfileIds([]);
       setImportPreview(null);
       void queryClient.invalidateQueries({ queryKey: serverKeys.list() });
     },
@@ -120,6 +129,7 @@ export function useConfigImport() {
     setScanCandidates([]);
     setScanStatus(null);
     setImportPreview(null);
+    setSelectedProfileIds([]);
   }, []);
 
   const clearJsonImport = useCallback(() => {
@@ -138,6 +148,7 @@ export function useConfigImport() {
   return {
     scanCandidates,
     selectedImports,
+    selectedProfileIds,
     scanStatus,
     importPreview,
     hasStaticAuthorizationHeader,
@@ -151,6 +162,7 @@ export function useConfigImport() {
     formatJson,
     parseJson,
     executeImport: executeImportMutation.mutateAsync,
+    setSelectedProfileIds,
     toggleImport,
     clearScan,
     clearJsonImport,

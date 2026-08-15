@@ -34,10 +34,6 @@ impl AppError {
         Self::new(StatusCode::BAD_REQUEST, "ORDER_INVALID", msg)
     }
 
-    pub fn active_profile(msg: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "ACTIVE_PROFILE", msg)
-    }
-
     pub fn payload_too_large(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE", msg)
     }

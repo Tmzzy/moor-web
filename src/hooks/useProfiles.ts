@@ -2,18 +2,11 @@ import { useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, apiPost, apiPut, apiDelete } from "@/lib/api/client";
 import { routes } from "@/lib/api-routes";
-import { serverKeys, profileKeys, logKeys } from "@/lib/query-keys";
-import { useSSEEvent } from "@/contexts/SSEContext";
+import { profileKeys } from "@/lib/query-keys";
 import type { Profile, ProfileDetail } from "@moor/types";
 
 export function useProfiles() {
   const queryClient = useQueryClient();
-
-  useSSEEvent("profile:activated", () => {
-    void queryClient.invalidateQueries({ queryKey: profileKeys.list() });
-    void queryClient.invalidateQueries({ queryKey: serverKeys.list() });
-    void queryClient.invalidateQueries({ queryKey: logKeys.all() });
-  });
 
   const {
     data: profiles = [],
@@ -32,16 +25,6 @@ export function useProfiles() {
     mutationFn: (name: string) => apiPost<Profile>(routes.profiles.create(), { name }),
     onSuccess: (profile) => {
       queryClient.setQueryData<Profile[]>(profileKeys.list(), (prev) => [...(prev ?? []), profile]);
-    },
-  });
-
-  const activateProfile = useMutation({
-    mutationFn: async (id: string) => {
-      await apiPut(routes.profiles.activate(id), {});
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: profileKeys.list() });
-      void queryClient.invalidateQueries({ queryKey: serverKeys.list() });
     },
   });
 
@@ -83,7 +66,6 @@ export function useProfiles() {
     error: error?.message ?? null,
     refresh,
     createProfile: createProfile.mutateAsync,
-    activateProfile: activateProfile.mutateAsync,
     deleteProfile: deleteProfile.mutateAsync,
     updateProfile: updateProfile.mutateAsync,
     updateProfileServer: updateProfileServer.mutateAsync,

@@ -19,8 +19,6 @@ pub enum Evt {
     },
     /// 服务器工具列表变更(启动后重新发现工具)。
     ServerTools { server_id: String },
-    /// 活动 Profile 切换。
-    ProfileActivated { profile_id: String },
     /// 设置变更(整体 Settings 值)。
     SettingsChanged { settings: Value },
 }
@@ -31,7 +29,6 @@ impl Evt {
         match self {
             Evt::ServerStatus { .. } => "server:status",
             Evt::ServerTools { .. } => "server:tools",
-            Evt::ProfileActivated { .. } => "profile:activated",
             Evt::SettingsChanged { .. } => "settings:changed",
         }
     }
@@ -49,9 +46,6 @@ impl Evt {
                 "errorMessage": error_message,
             }),
             Evt::ServerTools { server_id } => serde_json::json!({ "serverId": server_id }),
-            Evt::ProfileActivated { profile_id } => {
-                serde_json::json!({ "profileId": profile_id })
-            }
             Evt::SettingsChanged { settings } => settings.clone(),
         }
     }

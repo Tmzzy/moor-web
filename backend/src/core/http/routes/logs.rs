@@ -97,6 +97,7 @@ mod tests {
                     headers: None,
                     working_dir: None,
                     auto_start: false,
+                    profile_ids: vec![],
                 },
             )
             .expect("failed to insert server");

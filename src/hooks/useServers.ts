@@ -2,7 +2,7 @@ import { useCallback, useState, type SetStateAction } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, apiPost, apiPut, apiDelete } from "@/lib/api/client";
 import { routes } from "@/lib/api-routes";
-import { serverKeys } from "@/lib/query-keys";
+import { profileKeys, serverKeys } from "@/lib/query-keys";
 import { useSSEEvent } from "@/contexts/SSEContext";
 import type {
   Server,
@@ -198,6 +198,21 @@ export function useServerActions(callbacks?: {
     },
   });
 
+  const updateServerProfiles = useMutation({
+    mutationFn: async ({ id, profileIds }: { id: string; profileIds: string[] }) => {
+      return apiPut<{ profileIds: string[] }>(routes.servers.profiles(id), { profileIds });
+    },
+    onSuccess: async ({ profileIds }, { id }) => {
+      queryClient.setQueryData<ServerDetail>(serverKeys.detail(id), (previous) =>
+        previous ? { ...previous, profileIds } : previous,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: profileKeys.list() }),
+        queryClient.invalidateQueries({ queryKey: serverKeys.toolsRoot(id) }),
+      ]);
+    },
+  });
+
   const removeServer = useMutation({
     mutationFn: async (id: string) => {
       await apiDelete(routes.servers.delete(id));
@@ -235,6 +250,7 @@ export function useServerActions(callbacks?: {
   return {
     addServer: addServer.mutateAsync,
     updateServer: updateServer.mutateAsync,
+    updateServerProfiles: updateServerProfiles.mutateAsync,
     startServer: async (id: string) => {
       await startServer.mutateAsync(id);
     },
@@ -289,11 +305,11 @@ export function useServer(id: string | undefined) {
 export function useServerTools(serverId: string | undefined, profileId?: string) {
   const queryClient = useQueryClient();
 
-  const { data: tools = [] } = useQuery<ToolDetail[]>({
+  const { data: queriedTools = [] } = useQuery<ToolDetail[]>({
     queryKey: serverKeys.tools(serverId!, profileId),
     queryFn: ({ signal }) =>
-      api<ToolDetail[]>(routes.servers.tools(serverId!, profileId), { signal }),
-    enabled: !!serverId,
+      api<ToolDetail[]>(routes.servers.tools(serverId!, profileId!), { signal }),
+    enabled: !!serverId && !!profileId,
   });
 
   const refresh = useCallback(() => {
@@ -301,7 +317,7 @@ export function useServerTools(serverId: string | undefined, profileId?: string)
     void queryClient.invalidateQueries({ queryKey: serverKeys.toolsRoot(serverId) });
   }, [queryClient, serverId]);
 
-  return { tools, refresh };
+  return { tools: profileId ? queriedTools : [], refresh };
 }
 
 export type { ServerAction };

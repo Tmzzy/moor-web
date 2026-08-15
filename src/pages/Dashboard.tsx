@@ -46,7 +46,6 @@ export function Dashboard() {
   const running = servers.filter((s) => s.status === "running").length;
   const stopped = servers.filter((s) => s.status === "stopped").length;
   const errored = servers.filter((s) => s.status === "error").length;
-  const activeProfile = profiles.find((p) => p.isActive);
 
   const recentLogs = logs.slice(0, 6);
   const recentServers = servers.slice(0, 5);
@@ -65,7 +64,7 @@ export function Dashboard() {
             <div className="min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <span className="font-headline text-sm font-medium text-cursor-dark">
-                  Global MCP Endpoint
+                  MCP Endpoint
                 </span>
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping-slow absolute inline-flex h-full w-full rounded-full bg-success-muted opacity-50" />
@@ -107,8 +106,8 @@ export function Dashboard() {
         />
         <StatCard
           icon={FolderOpen}
-          label="Active Profile"
-          value={activeProfile?.name || "—"}
+          label="Profiles"
+          value={profiles.length}
           accent="bg-cursor-orange/10 text-cursor-orange border-cursor-orange/20"
           delay={5}
         />

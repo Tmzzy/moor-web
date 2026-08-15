@@ -152,7 +152,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
 
   return (
     <>
-      <aside className="hidden w-[220px] shrink-0 flex-col border-r border-[var(--fg-10)] bg-surface-300 md:flex">
+      <aside className="hidden w-[220px] shrink-0 flex-col overflow-y-auto border-r border-[var(--fg-10)] bg-surface-300 md:flex">
         <SidebarContent />
       </aside>
       {mobileOpen ? (
@@ -167,7 +167,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
             role="dialog"
             aria-modal="true"
             aria-label="Main navigation"
-            className="relative flex h-full w-[min(280px,85vw)] flex-col border-r border-[var(--fg-10)] bg-surface-300 shadow-[0_20px_60px_rgba(0,0,0,0.2)]"
+            className="relative flex h-full w-[min(280px,85vw)] flex-col overflow-y-auto border-r border-[var(--fg-10)] bg-surface-300 shadow-[0_20px_60px_rgba(0,0,0,0.2)]"
           >
             <SidebarContent onNavigate={onCloseMobile} showClose />
           </aside>

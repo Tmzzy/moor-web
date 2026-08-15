@@ -13,7 +13,6 @@ use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
 use time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_sessions::{cookie::SameSite, Expiry, MemoryStore, SessionManagerLayer};
 
@@ -42,34 +41,14 @@ impl ManagementAuth {
     }
 }
 
-pub struct McpAuth {
-    token: RwLock<String>,
-}
-
-impl McpAuth {
-    pub fn bearer(token: String) -> Self {
-        Self {
-            token: RwLock::new(token),
-        }
-    }
-
-    pub async fn matches(&self, token: &str) -> bool {
-        auth::constant_time_eq(token.as_bytes(), self.token.read().await.as_bytes())
-    }
-
-    pub async fn reveal(&self) -> String {
-        self.token.read().await.clone()
-    }
-
-    pub async fn replace(&self, token: String) {
-        *self.token.write().await = token;
-    }
+#[derive(Clone)]
+pub(crate) struct McpProfileContext {
+    pub(crate) profile_id: String,
 }
 
 pub struct AppState {
     pub db: Arc<Database>,
     pub management_auth: ManagementAuth,
-    pub mcp_auth: McpAuth,
     pub version: String,
     pub port: u16,
     pub public_url: String,
@@ -87,7 +66,6 @@ impl AppState {
     pub fn new(
         db: Arc<Database>,
         management_auth: ManagementAuth,
-        mcp_auth: McpAuth,
         version: String,
         port: u16,
         public_url: String,
@@ -98,7 +76,6 @@ impl AppState {
         Self {
             db,
             management_auth,
-            mcp_auth,
             version,
             port,
             public_url,
@@ -119,11 +96,13 @@ impl AppState {
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         settings::init_settings(db.as_ref(), data_dir).expect("failed to init settings");
+        crate::core::db::profile_repo::ProfileRepository::new(&db)
+            .seed_initial()
+            .expect("failed to seed initial profile");
         let event_bus = Arc::new(EventBus::new(16));
         Arc::new(Self::new(
             db.clone(),
             ManagementAuth::basic("test".to_string(), "test-password".to_string()),
-            McpAuth::bearer("test-mcp-token".to_string()),
             "test".to_string(),
             19323,
             "http://localhost:19323".to_string(),
@@ -155,7 +134,6 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .merge(routes::settings::router())
         .merge(routes::events::router())
         .merge(routes::import_routes::router())
-        .merge(routes::security::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::management_auth_middleware,
@@ -208,6 +186,8 @@ pub async fn start_server(state: Arc<AppState>, host: &str, port: u16) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::audit_log_repo::AuditLogRepository;
+    use crate::core::db::profile_repo::ProfileRepository;
     use axum::{
         body::Body,
         http::{header, Request},
@@ -255,7 +235,16 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("failed to create static directory");
         std::fs::write(static_dir.join("index.html"), "<html>Moor SPA</html>")
             .expect("failed to write test index");
-        let app = create_app(AppState::for_test(&data_dir));
+        let state = AppState::for_test(&data_dir);
+        let profile = ProfileRepository::new(&state.db)
+            .find_all()
+            .expect("failed to list profiles")
+            .remove(0);
+        let profile_token = ProfileRepository::new(&state.db)
+            .find_mcp_token(&profile.id)
+            .expect("failed to query profile token")
+            .expect("initial profile should have a token");
+        let app = create_app(state);
 
         let health = app
             .clone()
@@ -303,9 +292,6 @@ mod tests {
         assert!(!management_body
             .windows(b"test-password".len())
             .any(|window| window == b"test-password"));
-        assert!(!management_body
-            .windows(b"test-mcp-token".len())
-            .any(|window| window == b"test-mcp-token"));
 
         let mcp_without_auth = app
             .clone()
@@ -346,7 +332,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
-                    .header(header::AUTHORIZATION, "Bearer test-mcp-token")
+                    .header(header::AUTHORIZATION, format!("Bearer {profile_token}"))
                     .body(Body::from("{}"))
                     .expect("failed to build authenticated MCP request"),
             )
@@ -496,87 +482,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_endpoint_rotates_the_mcp_bearer_credential() {
-        let data_dir = std::env::temp_dir().join(format!("moor-token-{}", uuid::Uuid::new_v4()));
-        let app = create_app(AppState::for_test(&data_dir));
+    async fn profile_tokens_route_concurrent_requests_to_their_own_profiles() {
+        let data_dir =
+            std::env::temp_dir().join(format!("moor-profile-auth-{}", uuid::Uuid::new_v4()));
+        let state = AppState::for_test(&data_dir);
+        let profile_repo = ProfileRepository::new(&state.db);
+        let main = profile_repo
+            .find_all()
+            .expect("query initial profile")
+            .remove(0);
+        let main_token = profile_repo
+            .find_mcp_token(&main.id)
+            .expect("query initial profile token")
+            .expect("initial profile token should exist");
+        let work = profile_repo.create("Work").expect("create work profile");
+        let work_token = profile_repo
+            .find_mcp_token(&work.id)
+            .expect("query work profile token")
+            .expect("work profile token should exist");
+        let app = create_app(state.clone());
 
-        let current = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/security/mcp-token")
-                    .header(header::AUTHORIZATION, basic_authorization())
-                    .body(Body::empty())
-                    .expect("failed to build token request"),
-            )
-            .await
-            .expect("token request failed");
-        assert_eq!(current.status(), StatusCode::OK);
-        assert_eq!(
-            current
-                .headers()
-                .get(header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some("no-store"),
-        );
-        let current_body = axum::body::to_bytes(current.into_body(), usize::MAX)
-            .await
-            .expect("failed to read token response");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&current_body)
-                .expect("token response should be JSON")["token"],
-            "test-mcp-token",
-        );
+        for (token, tool_name) in [
+            (&main_token, "missing_main_tool"),
+            (&work_token, "missing_work_tool"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(
+                            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool_name}","arguments":{{}}}}}}"#
+                        )))
+                        .expect("profile MCP request should build"),
+                )
+                .await
+                .expect("profile MCP request should complete");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let main_logs = AuditLogRepository::new(&state.db)
+            .query_logs(None, Some("missing_main_tool"), None, None, Some(1), None)
+            .expect("query initial profile audit log");
+        let work_logs = AuditLogRepository::new(&state.db)
+            .query_logs(None, Some("missing_work_tool"), None, None, Some(1), None)
+            .expect("query work profile audit log");
+        assert_eq!(main_logs[0].profile_id.as_deref(), Some(main.id.as_str()));
+        assert_eq!(work_logs[0].profile_id.as_deref(), Some(work.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rotating_one_profile_token_revokes_only_that_profile_token() {
+        let data_dir =
+            std::env::temp_dir().join(format!("moor-profile-rotate-{}", uuid::Uuid::new_v4()));
+        let state = AppState::for_test(&data_dir);
+        let profile_repo = ProfileRepository::new(&state.db);
+        let personal = profile_repo
+            .create("Personal")
+            .expect("create personal profile");
+        let work = profile_repo.create("Work").expect("create work profile");
+        let personal_token = profile_repo
+            .find_mcp_token(&personal.id)
+            .expect("query personal token")
+            .expect("personal token should exist");
+        let work_token = profile_repo
+            .find_mcp_token(&work.id)
+            .expect("query work token")
+            .expect("work token should exist");
+        let app = create_app(state);
 
         let rotated = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/security/mcp-token/rotate")
+                    .uri(format!("/api/profiles/{}/mcp-token/rotate", personal.id))
                     .header(header::AUTHORIZATION, basic_authorization())
                     .body(Body::empty())
-                    .expect("failed to build token rotation request"),
+                    .expect("rotation request should build"),
             )
             .await
-            .expect("token rotation request failed");
+            .expect("rotation request should complete");
         assert_eq!(rotated.status(), StatusCode::OK);
         let rotated_body = axum::body::to_bytes(rotated.into_body(), usize::MAX)
             .await
-            .expect("failed to read token rotation response");
+            .expect("rotation response should be readable");
         let rotated_token = serde_json::from_slice::<serde_json::Value>(&rotated_body)
             .expect("rotation response should be JSON")["token"]
             .as_str()
-            .expect("rotation response should include token")
+            .expect("rotation response should contain a token")
             .to_string();
-        assert_ne!(rotated_token, "test-mcp-token");
 
-        let old_token = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header(header::AUTHORIZATION, "Bearer test-mcp-token")
-                    .body(Body::from("{}"))
-                    .expect("failed to build old token request"),
-            )
-            .await
-            .expect("old token request failed");
-        assert_eq!(old_token.status(), StatusCode::UNAUTHORIZED);
-
-        let new_token = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header(header::AUTHORIZATION, format!("Bearer {rotated_token}"))
-                    .body(Body::from("{}"))
-                    .expect("failed to build new token request"),
-            )
-            .await
-            .expect("new token request failed");
-        assert_eq!(new_token.status(), StatusCode::ACCEPTED);
+        for (token, expected_status) in [
+            (personal_token.as_str(), StatusCode::UNAUTHORIZED),
+            (rotated_token.as_str(), StatusCode::ACCEPTED),
+            (work_token.as_str(), StatusCode::ACCEPTED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from("{}"))
+                        .expect("MCP request should build"),
+                )
+                .await
+                .expect("MCP request should complete");
+            assert_eq!(response.status(), expected_status);
+        }
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

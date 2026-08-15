@@ -141,16 +141,6 @@ fn management_auth() -> Result<core::http::ManagementAuth, String> {
     Ok(core::http::ManagementAuth::basic(username, password))
 }
 
-fn mcp_token_bootstrap() -> Result<Option<String>, String> {
-    match env::var("MOOR_MCP_TOKEN") {
-        Ok(token) => Ok(Some(token)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => {
-            Err("MOOR_MCP_TOKEN must contain valid Unicode".to_string())
-        }
-    }
-}
-
 fn healthcheck(port: u16) -> Result<(), String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let timeout = Duration::from_secs(3);
@@ -206,7 +196,6 @@ async fn main() -> Result<(), String> {
     }
 
     let management_auth = management_auth()?;
-    let mcp_token_bootstrap = mcp_token_bootstrap()?;
     let host = env::var("MOOR_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
     let data_dir = data_dir();
     let static_dir = static_dir();
@@ -220,11 +209,9 @@ async fn main() -> Result<(), String> {
     ensure_runtime_directories(&data_dir, env::vars_os())?;
     let db = Arc::new(core::db::Database::open(&data_dir.join("moor.db"))?);
     db.run_migrations()?;
-    let mcp_token = core::services::mcp_token::initialize(&db, mcp_token_bootstrap.as_deref())?;
-    let mcp_auth = core::http::McpAuth::bearer(mcp_token);
     let settings = core::services::settings::init_settings(&db, &data_dir)?;
 
-    core::db::profile_repo::ProfileRepository::new(&db).seed_default()?;
+    core::db::profile_repo::ProfileRepository::new(&db).seed_initial()?;
 
     let event_bus = Arc::new(core::services::event_bus::EventBus::new(256));
     let server_manager = Arc::new(core::services::server_manager::ServerManager::new(
@@ -243,7 +230,6 @@ async fn main() -> Result<(), String> {
     let state = Arc::new(core::http::AppState::new(
         db,
         management_auth,
-        mcp_auth,
         env!("CARGO_PKG_VERSION").to_string(),
         port,
         public_url.clone(),

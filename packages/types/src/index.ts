@@ -22,12 +22,16 @@ export type { Profile, ProfileDetail, ProfileServerState } from "./profile.js";
 export type { MCPTool, ToolCatalogEntry } from "./mcp.js";
 export type { ToolDetail } from "./tool.js";
 export type { AuditLogEntry, LogStats } from "./audit.js";
-export type { ClientSnippet, ConvertResult } from "./import.js";
+export type {
+  ClientSnippet,
+  ConvertResult,
+  ExecuteImportInput,
+  ExecuteImportResult,
+} from "./import.js";
 export type {
   MoorEvent,
   MoorEventData,
   MoorEventType,
-  ProfileActivatedEvent,
   ServerStatusEvent,
   ServerToolsEvent,
   SettingsChangedEvent,

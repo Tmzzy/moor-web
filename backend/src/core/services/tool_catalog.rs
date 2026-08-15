@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
 
-use crate::core::db::profile_repo::ProfileRepository;
 use crate::core::db::tool_discovery_repo::{ProfileTool, ToolDiscoveryRepository};
 use crate::core::db::Database;
 use serde::Serialize;
@@ -31,20 +30,11 @@ pub struct ToolCatalogService;
 impl ToolCatalogService {
     pub fn get_tool_catalog(
         db: &Database,
-        profile_id: Option<&str>,
+        profile_id: &str,
         visible_server_ids: Option<&std::collections::HashSet<String>>,
     ) -> Vec<ToolCatalogEntry> {
-        let profile_repo = ProfileRepository::new(db);
-        let active_id = match profile_id {
-            Some(id) => id.to_string(),
-            None => match profile_repo.find_active_id() {
-                Ok(Some(id)) => id,
-                _ => return vec![],
-            },
-        };
-
         let tool_repo = ToolDiscoveryRepository::new(db);
-        let profile_tools = match tool_repo.find_by_profile_id(&active_id) {
+        let profile_tools = match tool_repo.find_by_profile_id(profile_id) {
             Ok(t) => t,
             Err(_) => return vec![],
         };
@@ -63,20 +53,11 @@ impl ToolCatalogService {
     pub fn get_tool_details(
         db: &Database,
         server_id: &str,
-        profile_id: Option<&str>,
+        profile_id: &str,
         visible_server_ids: Option<&std::collections::HashSet<String>>,
     ) -> Vec<ToolDetail> {
-        let profile_repo = ProfileRepository::new(db);
-        let active_id = match profile_id {
-            Some(id) => id.to_string(),
-            None => match profile_repo.find_active_id() {
-                Ok(Some(id)) => id,
-                _ => return vec![],
-            },
-        };
-
         let tool_repo = ToolDiscoveryRepository::new(db);
-        let profile_tools = match tool_repo.find_by_profile_id(&active_id) {
+        let profile_tools = match tool_repo.find_by_profile_id(profile_id) {
             Ok(t) => t,
             Err(_) => return vec![],
         };
@@ -98,7 +79,7 @@ impl ToolCatalogService {
         let catalog = build_tool_catalog_entries(visible_tools);
 
         let disabled = tool_repo
-            .find_disabled_tools_for_server(Some(&active_id), server_id)
+            .find_disabled_tools_for_server(profile_id, server_id)
             .unwrap_or_default();
         let discovered = match tool_repo.find_by_server_id(server_id) {
             Ok(tools) => tools,
@@ -231,6 +212,7 @@ mod tests {
                     headers: None,
                     working_dir: None,
                     auto_start: false,
+                    profile_ids: vec![],
                 },
             )
             .expect("failed to insert server");
@@ -242,17 +224,23 @@ mod tests {
         let db = Database::open(&db_path).expect("failed to open db");
         db.run_migrations().expect("failed to migrate");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         insert_server(&db, "aaaaaaaa1111", "GitHub MCP");
         insert_server(&db, "aaaaaaaa2222", "github-mcp");
         insert_server(&db, "aaaaaaaa3333", "github mcp");
         profile_repo
-            .assign_to_active_profile(&[
-                "aaaaaaaa1111".to_string(),
-                "aaaaaaaa2222".to_string(),
-                "aaaaaaaa3333".to_string(),
-            ])
+            .assign_to_profile(
+                &profile_id,
+                &[
+                    "aaaaaaaa1111".to_string(),
+                    "aaaaaaaa2222".to_string(),
+                    "aaaaaaaa3333".to_string(),
+                ],
+            )
             .expect("failed to assign profile servers");
 
         let tool_repo = ToolDiscoveryRepository::new(&db);
@@ -270,10 +258,6 @@ mod tests {
         tool_repo
             .replace_tools_for_server("aaaaaaaa3333", &search_tool)
             .expect("failed to insert tools for disabled server");
-        let profile_id = profile_repo
-            .find_active_id()
-            .expect("failed to find active profile")
-            .expect("active profile should exist");
         profile_repo
             .upsert_profile_server(
                 &profile_id,
@@ -283,7 +267,7 @@ mod tests {
             )
             .expect("failed to disable tool");
 
-        let exposed_names: Vec<_> = ToolCatalogService::get_tool_catalog(&db, None, None)
+        let exposed_names: Vec<_> = ToolCatalogService::get_tool_catalog(&db, &profile_id, None)
             .into_iter()
             .map(|tool| tool.exposed_name)
             .collect();
@@ -305,16 +289,15 @@ mod tests {
         let db = Database::open(&db_path).expect("failed to open db");
         db.run_migrations().expect("failed to migrate");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         insert_server(&db, "server-a", "Alpha");
         profile_repo
-            .assign_to_active_profile(&["server-a".to_string()])
+            .assign_to_profile(&profile_id, &["server-a".to_string()])
             .expect("failed to assign profile server");
-        let profile_id = profile_repo
-            .find_active_id()
-            .expect("failed to find active profile")
-            .expect("active profile should exist");
         profile_repo
             .upsert_profile_server(&profile_id, "server-a", Some(false), None)
             .expect("failed to disable server");
@@ -330,7 +313,7 @@ mod tests {
             .expect("failed to insert tool");
 
         let exposed_names: Vec<_> =
-            ToolCatalogService::get_tool_details(&db, "server-a", Some(&profile_id), None)
+            ToolCatalogService::get_tool_details(&db, "server-a", &profile_id, None)
                 .into_iter()
                 .map(|tool| tool.exposed_name)
                 .collect();

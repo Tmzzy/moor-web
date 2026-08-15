@@ -15,7 +15,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 
-use super::{app_error::AppError, AppState};
+use crate::core::db::profile_repo::ProfileRepository;
+
+use super::{app_error::AppError, AppState, McpProfileContext};
 
 const SESSION_USERNAME_KEY: &str = "username";
 
@@ -211,16 +213,27 @@ pub async fn management_auth_middleware(
 
 pub async fn mcp_auth_middleware(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
-    let token = authorization_parameter(&req, "Bearer").map(str::to_owned);
-    if let Some(token) = token {
-        if state.mcp_auth.matches(&token).await {
-            return next.run(req).await;
+    let Some(token) = authorization_parameter(&req, "Bearer").map(str::to_owned) else {
+        return bearer_unauthorized();
+    };
+
+    let profile_id = match ProfileRepository::new(&state.db).find_id_by_mcp_token(&token) {
+        Ok(profile_id) => profile_id,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to resolve MCP profile token");
+            None
         }
-    }
-    bearer_unauthorized()
+    };
+
+    let Some(profile_id) = profile_id else {
+        return bearer_unauthorized();
+    };
+    req.extensions_mut()
+        .insert(McpProfileContext { profile_id });
+    next.run(req).await
 }
 
 #[cfg(test)]

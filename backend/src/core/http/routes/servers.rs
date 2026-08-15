@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/servers/{id}/start", post(start))
         .route("/api/servers/{id}/stop", post(stop))
         .route("/api/servers/{id}/tools", get(tools))
+        .route("/api/servers/{id}/profiles", put(update_profiles))
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Server>>, AppError> {
@@ -43,6 +44,7 @@ struct CreateServerBody {
     headers: Option<std::collections::HashMap<String, String>>,
     working_dir: Option<String>,
     auto_start: Option<bool>,
+    profile_ids: Vec<String>,
 }
 
 async fn create(
@@ -59,12 +61,11 @@ async fn create(
         headers: body.headers,
         working_dir: body.working_dir,
         auto_start: body.auto_start.unwrap_or(false),
+        profile_ids: body.profile_ids,
     };
-    input.validate().map_err(AppError::validation)?;
-
     let server = ServerService::insert_server(&state.db, &state.server_manager, &input)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(AppError::from)?;
 
     if server.auto_start {
         let sm = state.server_manager.clone();
@@ -102,10 +103,18 @@ async fn reorder(
     Ok(Json(servers))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerDetailResponse {
+    #[serde(flatten)]
+    server: Server,
+    profile_ids: Vec<String>,
+}
+
 async fn get_one(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Server>, AppError> {
+) -> Result<Json<ServerDetailResponse>, AppError> {
     let mut server = ServerService::get_server(&state.db, &id)
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("Server not found"))?;
@@ -114,7 +123,28 @@ async fn get_one(
         server.status = managed.status;
     }
 
-    Ok(Json(server))
+    let profile_ids =
+        ServerService::get_server_profile_ids(&state.db, &id).map_err(AppError::from)?;
+    Ok(Json(ServerDetailResponse {
+        server,
+        profile_ids,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProfilesBody {
+    profile_ids: Vec<String>,
+}
+
+async fn update_profiles(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<UpdateProfilesBody>,
+) -> Result<Json<Value>, AppError> {
+    let profile_ids = ServerService::update_server_profile_ids(&state.db, &id, &body.profile_ids)
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "profileIds": profile_ids })))
 }
 
 async fn update(
@@ -166,7 +196,7 @@ async fn stop(
 
 #[derive(Deserialize)]
 struct ToolsQuery {
-    profile_id: Option<String>,
+    profile_id: String,
 }
 
 async fn tools(
@@ -176,7 +206,7 @@ async fn tools(
 ) -> Result<Json<Value>, AppError> {
     let tools = state
         .server_manager
-        .get_tool_details(&id, query.profile_id.as_deref())
+        .get_tool_details(&id, &query.profile_id)
         .await;
     Ok(Json(
         serde_json::to_value(tools).map_err(|e| AppError::internal(e.to_string()))?,
@@ -190,6 +220,7 @@ mod tests {
     use crate::core::db::server_repo::ServerRepository;
     use crate::core::db::tool_discovery_repo::{ToolDiscoveryRepository, ToolInsert};
     use crate::core::db::Database;
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::SystemTime;
 
@@ -221,6 +252,7 @@ mod tests {
                     headers: None,
                     working_dir: None,
                     auto_start: false,
+                    profile_ids: vec![],
                 },
             )
             .expect("failed to insert server");
@@ -241,9 +273,10 @@ mod tests {
     async fn create_rolls_back_server_when_profile_assignment_fails() {
         let data_dir = temp_data_dir("create-profile-failure");
         let state = test_state(data_dir.clone());
-        ProfileRepository::new(&state.db)
-            .seed_default()
-            .expect("failed to seed profile");
+        let profile_id = ProfileRepository::new(&state.db)
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
         fail_profile_server_inserts(&state.db);
 
         let result = create(
@@ -258,6 +291,7 @@ mod tests {
                 headers: None,
                 working_dir: None,
                 auto_start: None,
+                profile_ids: vec![profile_id],
             }),
         )
         .await;
@@ -278,20 +312,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_an_unknown_profile_without_falling_back() {
+        let data_dir = temp_data_dir("create-unknown-profile");
+        let state = test_state(data_dir.clone());
+
+        let error = create(
+            State(state.clone()),
+            axum::Json(CreateServerBody {
+                name: "Scoped".to_string(),
+                connection_type: "stdio".to_string(),
+                command: Some("node".to_string()),
+                args: None,
+                url: None,
+                env: None,
+                headers: None,
+                working_dir: None,
+                auto_start: None,
+                profile_ids: vec!["missing-profile".to_string()],
+            }),
+        )
+        .await
+        .expect_err("unknown profile should fail");
+
+        assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        let servers = ServerRepository::new(&state.db)
+            .find_all()
+            .expect("servers should remain queryable");
+        assert!(servers.is_empty());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn tools_route_rejects_requests_without_a_profile_id() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let data_dir = temp_data_dir("tools-profile-required");
+        let state = test_state(data_dir.clone());
+        let response = router()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/servers/server-a/tools")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn tools_route_returns_disabled_tools_with_callable_exposed_names() {
         let data_dir = temp_data_dir("tools-detail");
         let state = test_state(data_dir.clone());
         let profile_repo = ProfileRepository::new(&state.db);
-        profile_repo.seed_default().expect("failed to seed profile");
         let profile_id = profile_repo
-            .find_active_id()
-            .expect("failed to find active profile")
-            .expect("active profile should exist");
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         insert_server(&state.db, "server-a", "Alpha");
         insert_server(&state.db, "server-b", "Beta");
         profile_repo
-            .assign_to_active_profile(&["server-a".to_string(), "server-b".to_string()])
+            .assign_to_profile(
+                &profile_id,
+                &["server-a".to_string(), "server-b".to_string()],
+            )
             .expect("failed to assign profile servers");
         profile_repo
             .upsert_profile_server(
@@ -318,9 +407,7 @@ mod tests {
         let Json(value) = tools(
             State(state),
             Path("server-a".to_string()),
-            Query(ToolsQuery {
-                profile_id: Some(profile_id),
-            }),
+            Query(ToolsQuery { profile_id }),
         )
         .await
         .expect("tools route should succeed");
@@ -331,6 +418,42 @@ mod tests {
         assert_eq!(list[0]["disabled"], true);
         assert_eq!(list[0]["exposedName"], "alpha__search");
 
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn server_profile_route_reuses_one_server_across_multiple_profiles() {
+        let data_dir = temp_data_dir("shared-profiles");
+        let state = test_state(data_dir.clone());
+        let profile_repo = ProfileRepository::new(&state.db);
+        let personal_id = profile_repo
+            .create("Personal")
+            .expect("create personal profile")
+            .id;
+        let work_id = profile_repo.create("Work").expect("create work profile").id;
+        insert_server(&state.db, "shared", "Shared MCP");
+
+        let Json(updated) = update_profiles(
+            State(state.clone()),
+            Path("shared".to_string()),
+            axum::Json(UpdateProfilesBody {
+                profile_ids: vec![personal_id.clone(), work_id.clone()],
+            }),
+        )
+        .await
+        .expect("update profile scope");
+        let Json(detail) = get_one(State(state), Path("shared".to_string()))
+            .await
+            .expect("load server detail");
+
+        let updated_ids: HashSet<String> = serde_json::from_value(updated["profileIds"].clone())
+            .expect("profile IDs should deserialize");
+        let detail_ids: HashSet<String> = detail.profile_ids.into_iter().collect();
+        assert_eq!(
+            updated_ids,
+            HashSet::from([personal_id.clone(), work_id.clone()])
+        );
+        assert_eq!(detail_ids, HashSet::from([personal_id, work_id]));
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }

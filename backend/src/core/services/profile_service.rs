@@ -3,14 +3,12 @@
 
 //! Profile 领域服务。
 //!
-//! 封装 Profile 持久化和领域事件发射,让路由层只负责 HTTP 形状。
+//! 封装 Profile 持久化与领域校验,让路由层只负责 HTTP 形状。
 
 use crate::core::db::profile_repo::{
     Profile, ProfileDetailServer, ProfileRepository, ProfileServerState, RemoveResult,
 };
 use crate::core::db::Database;
-use crate::core::services::event_bus::{EventBus, Evt};
-use std::sync::Arc;
 
 pub struct ProfileService;
 
@@ -19,7 +17,6 @@ pub struct ProfileService;
 pub enum ProfileServiceError {
     NotFound(String),
     Validation(String),
-    Active(String),
     Internal(String),
 }
 
@@ -29,7 +26,6 @@ impl From<ProfileServiceError> for crate::core::http::app_error::AppError {
         match e {
             ProfileServiceError::NotFound(m) => Self::not_found(m),
             ProfileServiceError::Validation(m) => Self::validation(m),
-            ProfileServiceError::Active(m) => Self::active_profile(m),
             ProfileServiceError::Internal(m) => Self::internal(m),
         }
     }
@@ -86,28 +82,21 @@ impl ProfileService {
             RemoveResult::NotFound => {
                 Err(ProfileServiceError::NotFound("Profile not found".into()))
             }
-            RemoveResult::Active => Err(ProfileServiceError::Active(
-                "Cannot delete active profile".into(),
-            )),
         }
     }
 
-    /// 激活 profile 并发出 `profile:activated` 事件。
-    /// 事件发射是领域规则——切了活动 profile,相关缓存(profiles/servers/logs)该失效——
-    /// 所以它属于 service,不属于路由层。
-    pub fn activate(
-        db: &Database,
-        event_bus: &Arc<EventBus>,
-        id: &str,
-    ) -> Result<Profile, ProfileServiceError> {
-        let profile = ProfileRepository::new(db)
-            .activate(id)
+    pub fn get_mcp_token(db: &Database, id: &str) -> Result<String, ProfileServiceError> {
+        ProfileRepository::new(db)
+            .find_mcp_token(id)
             .map_err(ProfileServiceError::Internal)?
-            .ok_or_else(|| ProfileServiceError::NotFound("Profile not found".into()))?;
-        event_bus.emit(Evt::ProfileActivated {
-            profile_id: id.to_string(),
-        });
-        Ok(profile)
+            .ok_or_else(|| ProfileServiceError::NotFound("Profile not found".into()))
+    }
+
+    pub fn rotate_mcp_token(db: &Database, id: &str) -> Result<String, ProfileServiceError> {
+        ProfileRepository::new(db)
+            .rotate_mcp_token(id)
+            .map_err(ProfileServiceError::Internal)?
+            .ok_or_else(|| ProfileServiceError::NotFound("Profile not found".into()))
     }
 
     pub fn get_profile_server(
