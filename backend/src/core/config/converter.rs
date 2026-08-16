@@ -201,6 +201,7 @@ mod tests {
                 headers: None,
                 working_dir: Some("/tmp/first".into()),
                 auto_start: false,
+                profile_ids: vec![],
             },
         )
         .expect("insert first");
@@ -221,6 +222,7 @@ mod tests {
                 ),
                 working_dir: None,
                 auto_start: false,
+                profile_ids: vec![],
             },
         )
         .expect("insert second");

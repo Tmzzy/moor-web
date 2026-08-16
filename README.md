@@ -10,12 +10,13 @@ Moor Web 是一个自托管的 MCP 网关管理工具，由 Rust/Axum 后端和 
 ## 功能
 
 - 管理 stdio 与远程 HTTP MCP Server
-- 使用 Profile 组合 Server，并控制工具暴露范围
+- 使用可并行访问的 Profile 组合 Server，并控制工具暴露范围
+- 为每个 Profile 生成独立 MCP Token，同一 Server 可关联多个 Profile
 - 扫描、导入和转换常见 MCP 客户端配置
 - 为 Claude Code、Codex、OpenCode 和 Cursor 生成连接片段
 - 通过 SSE 实时同步 Server 状态和设置变更
 - 记录、筛选并脱敏展示 MCP 工具调用审计日志
-- 使用独立登录页保护管理界面，自动生成 MCP Access Token
+- 使用独立登录页保护管理界面，自动生成每个 Profile 的 MCP Access Token
 
 ## Docker 快速启动
 
@@ -34,7 +35,7 @@ docker compose up -d
 docker compose ps
 ```
 
-打开 <http://localhost:9223>，使用用户名 `moor` 和 `.env` 中的密码登录。MCP Token 会在首次启动时自动生成并保存到 `/data/moor.db`，无需预先设置。
+打开 <http://localhost:9223>，使用用户名 `moor` 和 `.env` 中的密码登录。Moor 会创建初始的 `Main` Profile，并为每个 Profile 自动生成独立 Token，保存到 `/data/moor.db`。
 
 不使用 Compose 时：
 
@@ -49,22 +50,22 @@ docker run -d \
   ghcr.io/tmzzy/moor-web:latest
 ```
 
-## 首次登录与 MCP Token
+## 首次登录与 Profile Token
 
 管理界面使用 Moor 自己的登录页。登录成功后，服务端签发 HttpOnly、SameSite Cookie；会话连续 7 天无活动后过期，退出登录或重启 Moor 也会使当前会话失效。Moor 前端不会把管理密码写入 localStorage 或 sessionStorage，也不会再显示原生 Basic Auth 弹窗。
 
-进入 **Client Config** 页面，在 **MCP Access Token** 区域可以：
+进入 **Client Config** 页面并明确选择一个 Profile，或者直接进入 Profile 详情页，即可管理该 Profile 的 Token：
 
 - 按需显示 Token
 - 直接复制 Token
 - 确认后轮换 Token
 
-Token 默认不会随普通管理 API 返回，也不会写入日志。轮换会立即使旧 Token 对后续请求失效，所有 MCP 客户端都必须更新。
+Token 默认不会随普通管理 API 返回，也不会写入日志。轮换只影响对应 Profile，并会立即使它的旧 Token 对后续请求失效；其他 Profile 的 Token 不受影响。
 
-客户端配置片段使用 `MOOR_MCP_TOKEN` 环境变量。复制页面中的 Token，并在运行 MCP 客户端的环境中设置：
+客户端配置片段使用 `MOOR_PROFILE_TOKEN` 环境变量。复制所选 Profile 的 Token，并在对应 MCP 客户端的环境中设置：
 
 ```bash
-export MOOR_MCP_TOKEN='moor_replace_with_the_generated_value'
+export MOOR_PROFILE_TOKEN='moor_replace_with_the_generated_value'
 ```
 
 默认 MCP 地址为：
@@ -72,6 +73,27 @@ export MOOR_MCP_TOKEN='moor_replace_with_the_generated_value'
 ```text
 http://localhost:9223/mcp
 ```
+
+### Profile Token 与多账号隔离
+
+每个 Profile 都有独立的 MCP Token。所有客户端仍连接同一个 `/mcp` 地址，Moor 根据 Bearer Token 将每个请求固定路由到对应 Profile。因此多个 Profile 可以被不同客户端同时使用，系统中不存在全局 Token、活动 Profile 或默认 Profile。
+
+这套模型只有两条核心规则：
+
+- 一个 Profile 对应一个独立 Profile Token 和一个确定的工具视图。
+- 一个 MCP Server 只保存一份配置并运行一个实例，但可以显式关联一个或多个 Profile。
+
+个人和公司 GitHub 账号可以按下面的方式配置：
+
+1. 创建 `Personal` 和 `Work` 两个 Profile。
+2. 创建两个独立的 GitHub MCP Server，分别保存个人和公司的 GitHub Token。
+3. 将个人 GitHub Server 只关联到 `Personal`，公司 GitHub Server 只关联到 `Work`。
+4. 对需要共用的 MCP Server，在创建、导入或 Server 详情页的 **Profiles** 区域一次选择两个或更多 Profile。Server 配置和运行实例只保留一份，不会复制。
+5. 在两个客户端中分别使用对应 Profile 详情页的 Token；它们可以同时连接 `/mcp`。
+
+Profile 提供的是 MCP 网关层的可见性与调用路由隔离，不是操作系统或多租户沙箱。所有 stdio Server 仍由同一个 Moor 服务用户运行，管理员也能查看和修改所有 Server 配置。公司凭据应只放在公司的 GitHub Server 配置中，不要放进共用 Server。
+
+完整的配置方式、显式 Profile 规则、管理 API 示例和升级边界见 [Profile 认证与 MCP Server 共享](docs/profile-auth-and-server-sharing.md)。
 
 ## 使用域名和 HTTPS
 
@@ -132,7 +154,6 @@ sudo systemctl reload nginx
 | `MOOR_PUBLIC_URL` | `http://localhost:9223` | 生成 MCP 客户端配置时使用的外部地址，也决定会话 Cookie 是否启用 `Secure` |
 | `MOOR_BIND_ADDRESS` | `127.0.0.1` | Compose 映射端口绑定的宿主机地址 |
 | `MOOR_HTTP_PORT` | `9223` | Compose 映射到宿主机的端口 |
-| `MOOR_MCP_TOKEN` | 自动生成 | 仅用于旧部署首次升级时导入已有 Token；数据库已有 Token 后不再覆盖 |
 
 如需让同一局域网直接访问端口，可以显式设置 `MOOR_BIND_ADDRESS=0.0.0.0`。此方式绕过宿主机反向代理，必须自行保证防火墙和 HTTPS 安全。
 
@@ -141,7 +162,7 @@ sudo systemctl reload nginx
 - `/`、前端静态资源和 `/api/auth/*` 可公开加载，以便显示登录页
 - `/api/health` 无需认证，供容器健康检查使用
 - 其他 `/api/*` 使用管理会话；主动携带 Basic Header 的脚本仍兼容
-- `/mcp` 只接受 `Authorization: Bearer <MCP Token>`
+- `/mcp` 只接受 `Authorization: Bearer <Profile Token>`，并固定路由到该 Token 所属的 Profile
 - 未认证的管理 API 返回 JSON 401，但不发送 Basic challenge，因此不会触发浏览器原生登录框
 - 带 `Origin` 的跨源请求会被拒绝；Nginx 必须保留原始 `Host`
 
@@ -158,11 +179,11 @@ docker compose pull
 docker compose up -d
 ```
 
-升级到自动 Token 版本时，如果旧部署仍设置了 `MOOR_MCP_TOKEN`，Moor 会在数据库尚无 Token 时导入该值，保持现有客户端连接不变。导入完成后可以从部署环境中删除该变量。
+从使用全局 MCP Token 的版本升级属于破坏性升级。原全局 Token 不会导入，也不能继续访问 `/mcp`；升级后必须从每个 Profile 获取各自的新 Token，并更新对应客户端。服务端不再读取 `MOOR_MCP_TOKEN`，客户端配置使用 `MOOR_PROFILE_TOKEN`。升级前先备份数据卷，完整迁移说明见 [升级边界](docs/profile-auth-and-server-sharing.md#升级边界)。
 
 ## 数据与备份
 
-Moor 数据保存在 `/data/moor.db`。数据库包含 Server 配置、设置、审计日志和可恢复的 MCP Token，应把整个数据卷视为敏感数据。Node.js 和 Python stdio Server 首次运行后，`/data/runtime` 还会保存 npm/uv 缓存、uv 管理的 Python 与工具环境；这些运行时数据可以重新下载，但会增加数据卷和备份体积。
+Moor 数据保存在 `/data/moor.db`。数据库包含 Server 配置、设置、审计日志和各 Profile Token，应把整个数据卷视为敏感数据。Node.js 和 Python stdio Server 首次运行后，`/data/runtime` 还会保存 npm/uv 缓存、uv 管理的 Python 与工具环境；这些运行时数据可以重新下载，但会增加数据卷和备份体积。
 
 备份前可以停止容器，或同时保存 SQLite 的 `moor.db`、`moor.db-wal` 和 `moor.db-shm`：
 

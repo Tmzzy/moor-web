@@ -391,11 +391,7 @@ impl ServerManager {
 
     pub async fn start_auto_start_servers(&self) {
         let profile_repo = ProfileRepository::new(&self.db);
-        let _active_id = match profile_repo.find_active_id() {
-            Ok(Some(id)) => id,
-            _ => return,
-        };
-        let server_ids = match profile_repo.find_active_profile_server_ids() {
+        let server_ids = match profile_repo.find_enabled_server_ids() {
             Ok(ids) => ids,
             Err(_) => return,
         };
@@ -418,8 +414,13 @@ impl ServerManager {
         }
     }
 
-    pub async fn call_tool(&self, exposed_name: &str, args: Value) -> Result<Value, String> {
-        let catalog = self.get_tool_catalog(None).await;
+    pub async fn call_tool(
+        &self,
+        profile_id: &str,
+        exposed_name: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let catalog = self.get_tool_catalog(profile_id).await;
         let owner = catalog
             .iter()
             .find(|t| t.exposed_name == exposed_name)
@@ -443,17 +444,13 @@ impl ServerManager {
 
     pub async fn get_tool_catalog(
         &self,
-        profile_id: Option<&str>,
+        profile_id: &str,
     ) -> Vec<crate::core::services::tool_catalog::ToolCatalogEntry> {
         let callable_ids = self.get_callable_server_ids().await;
         ToolCatalogService::get_tool_catalog(&self.db, profile_id, Some(&callable_ids))
     }
 
-    pub async fn get_tool_details(
-        &self,
-        server_id: &str,
-        profile_id: Option<&str>,
-    ) -> Vec<ToolDetail> {
+    pub async fn get_tool_details(&self, server_id: &str, profile_id: &str) -> Vec<ToolDetail> {
         let callable_ids = self.get_callable_server_ids().await;
         ToolCatalogService::get_tool_details(&self.db, server_id, profile_id, Some(&callable_ids))
     }
@@ -994,6 +991,7 @@ process.stdin.on("data", (chunk) => {{
                     headers: None,
                     working_dir: None,
                     auto_start,
+                    profile_ids: vec![],
                 },
             )
             .expect("failed to insert server");
@@ -1009,12 +1007,15 @@ process.stdin.on("data", (chunk) => {{
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "slow", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1072,12 +1073,15 @@ process.stdin.on("data", (chunk) => {{
         )
         .expect("settings update should succeed");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "phase", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1104,7 +1108,7 @@ process.stdin.on("data", (chunk) => {{
 
         let err = tokio::time::timeout(
             std::time::Duration::from_millis(6_500),
-            manager.call_tool("phase__echo", serde_json::json!({})),
+            manager.call_tool(&profile_id, "phase__echo", serde_json::json!({})),
         )
         .await
         .expect("tool call should return before the outer timeout")
@@ -1143,12 +1147,15 @@ process.stdin.on("data", (chunk) => {{
         )
         .expect("settings update should succeed");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "deadline", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1204,11 +1211,15 @@ process.stdin.on("data", (chunk) => {{
         )
         .expect("settings update should succeed");
         let profile_repo = ProfileRepository::new(&db);
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "slow", "unused".into(), false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
         manager.load_from_db().await;
 
@@ -1250,12 +1261,15 @@ process.stdin.on("data", (chunk) => {{
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "readable-server", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1285,12 +1299,15 @@ process.stdin.on("data", (chunk) => {{
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "stale", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1348,12 +1365,15 @@ process.stdin.on("data", (chunk) => {{
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "stale-failure", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1406,12 +1426,15 @@ process.stdin.on("data", (chunk) => {{
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &server_id, "stderr-once", script, false, 0);
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -1448,9 +1471,16 @@ process.stdin.on("data", (chunk) => {{
         let fast_id = uuid::Uuid::new_v4().to_string();
         insert_stdio_server(&db, &slow_id, "slow", "unused".into(), true, 0);
         insert_stdio_server(&db, &fast_id, "fast", "unused".into(), true, 1);
+        let personal_profile = profile_repo
+            .create("Personal")
+            .expect("create personal profile");
+        let work_profile = profile_repo.create("Work").expect("create work profile");
         profile_repo
-            .assign_to_active_profile(&[slow_id.clone(), fast_id.clone()])
-            .expect("failed to assign servers");
+            .assign_to_profile(&personal_profile.id, std::slice::from_ref(&slow_id))
+            .expect("failed to assign personal server");
+        profile_repo
+            .upsert_profile_server(&work_profile.id, &fast_id, Some(true), None)
+            .expect("failed to assign work server");
         manager.load_from_db().await;
 
         let auto_start = {
@@ -1614,9 +1644,6 @@ process.stdin.on("data", (chunk) => {{
     ) -> (Arc<Database>, Arc<ServerManager>) {
         let db = Arc::new(Database::open(&data_dir.join("moor.db")).expect("failed to open db"));
         db.run_migrations().expect("failed to run migrations");
-        ProfileRepository::new(&db)
-            .seed_default()
-            .expect("failed to seed profile");
         let event_bus = Arc::new(EventBus::new(16));
         let manager = Arc::new(ServerManager::with_connector(
             db.clone(),

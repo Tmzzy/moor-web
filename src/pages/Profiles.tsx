@@ -4,24 +4,9 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { useProfiles } from "@/hooks/useProfiles";
-import { Plus, Trash2, Check, Code, FlaskConical, User, Home } from "lucide-react";
+import { Plus, Trash2, Code, FlaskConical, User, Home } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import type { Profile } from "@moor/types";
-
-interface DisplayProfile {
-  profile: Profile;
-  originalIndex: number;
-}
-
-function getProfilesForDisplay(profiles: Profile[]): DisplayProfile[] {
-  return profiles
-    .map((profile, originalIndex) => ({ profile, originalIndex }))
-    .sort((a, b) => {
-      if (a.profile.isActive === b.profile.isActive) return a.originalIndex - b.originalIndex;
-      return a.profile.isActive ? -1 : 1;
-    });
-}
 
 const profileIcons = [Code, FlaskConical, User, Home, Code, FlaskConical, User, Home];
 const profileAccents = [
@@ -32,11 +17,10 @@ const profileAccents = [
 ];
 
 export function Profiles() {
-  const { profiles, createProfile, activateProfile, deleteProfile } = useProfiles();
+  const { profiles, createProfile, deleteProfile } = useProfiles();
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const navigate = useNavigate();
-  const displayProfiles = getProfilesForDisplay(profiles);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -87,26 +71,16 @@ export function Profiles() {
 
       {/* Profiles Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {displayProfiles.map(({ profile, originalIndex }) => {
-          const Icon = profileIcons[originalIndex % profileIcons.length];
-          const accent = profileAccents[originalIndex % profileAccents.length];
+        {profiles.map((profile, index) => {
+          const Icon = profileIcons[index % profileIcons.length];
+          const accent = profileAccents[index % profileAccents.length];
           return (
             <Card
               key={profile.id}
-              className={cn(
-                "group cursor-pointer transition-all duration-200 hover:shadow-[0_12px_40px_-12px_rgba(0,0,0,0.06)]",
-                profile.isActive
-                  ? "ring-2 ring-cursor-orange/20 border-cursor-orange/30"
-                  : "hover:border-[var(--fg-15)]",
-              )}
+              className="group cursor-pointer transition-all duration-200 hover:border-[var(--fg-15)] hover:shadow-[0_12px_40px_-12px_rgba(0,0,0,0.06)]"
               onClick={() => navigate(`/profiles/${profile.id}`)}
             >
               <CardContent className="p-5 relative">
-                {profile.isActive && (
-                  <div className="absolute top-4 right-4 text-cursor-orange">
-                    <Check className="h-5 w-5" />
-                  </div>
-                )}
                 <div
                   className={cn(
                     "h-10 w-10 rounded-xl flex items-center justify-center border mb-4 transition-colors",
@@ -115,53 +89,30 @@ export function Profiles() {
                 >
                   <Icon className="h-[18px] w-[18px]" />
                 </div>
-                <h3 className="font-headline text-base text-cursor-dark mb-1">{profile.name}</h3>
-                <p className="font-body text-xs text-[var(--fg-45)] mb-5">
-                  {profile.isActive ? "Currently active" : "Click to manage"}
-                </p>
+                <h3 className="mb-5 font-headline text-base text-cursor-dark">{profile.name}</h3>
                 <div className="flex items-center gap-2 pt-4 border-t border-[var(--fg-06)]">
-                  <span
-                    className={cn(
-                      "h-2 w-2 rounded-full",
-                      profile.isActive ? "bg-success-muted" : "bg-[var(--fg-20)]",
-                    )}
-                  />
+                  <span className="h-2 w-2 rounded-full bg-success-muted" />
                   <span className="font-body text-xs text-[var(--fg-40)]">
                     {profile.serverCount ?? 0} servers
                   </span>
                 </div>
                 {/* Actions overlay */}
                 <div
-                  className="absolute top-4 right-4 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                  style={{ opacity: profile.isActive ? undefined : undefined }}
+                  className="absolute top-4 right-4 flex items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {!profile.isActive && (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-xs px-2"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          activateProfile(profile.id);
-                        }}
-                      >
-                        Activate
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-[var(--fg-35)] hover:text-error-warm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteProfile(profile.id);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-11 w-11 text-[var(--fg-35)] hover:text-error-warm"
+                    aria-label={`Delete ${profile.name} profile`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteProfile(profile.id);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
               </CardContent>
             </Card>

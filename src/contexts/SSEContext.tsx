@@ -43,10 +43,6 @@ function isServerToolsEvent(data: unknown): data is MoorEventData<"server:tools"
   return isRecord(data) && typeof data.serverId === "string";
 }
 
-function isProfileActivatedEvent(data: unknown): data is MoorEventData<"profile:activated"> {
-  return isRecord(data) && typeof data.profileId === "string";
-}
-
 function isSettingsChangedEvent(data: unknown): data is MoorEventData<"settings:changed"> {
   return (
     isRecord(data) &&
@@ -69,8 +65,6 @@ export function parseMoorSSEEvent(
       return isServerStatusEvent(data) ? { type: event, data } : invalidEvent(event, warn);
     case "server:tools":
       return isServerToolsEvent(data) ? { type: event, data } : invalidEvent(event, warn);
-    case "profile:activated":
-      return isProfileActivatedEvent(data) ? { type: event, data } : invalidEvent(event, warn);
     case "settings:changed":
       return isSettingsChangedEvent(data) ? { type: event, data } : invalidEvent(event, warn);
     default:

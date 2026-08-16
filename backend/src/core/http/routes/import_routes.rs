@@ -75,17 +75,27 @@ async fn parse(axum::Json(body): axum::Json<ParseBody>) -> Result<Json<Value>, A
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ExecuteBody {
     servers: Option<Vec<ScannedServer>>,
+    profile_ids: Vec<String>,
 }
 
 async fn execute(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<ExecuteBody>,
 ) -> Result<Json<Value>, AppError> {
-    let result = import_service::execute_import(&state.db, &state.server_manager, body.servers)
-        .await
-        .map_err(AppError::internal)?;
+    if body.profile_ids.is_empty() {
+        return Err(AppError::validation("at least one profileId is required"));
+    }
+    let result = import_service::execute_import(
+        &state.db,
+        &state.server_manager,
+        body.servers,
+        &body.profile_ids,
+    )
+    .await
+    .map_err(AppError::from)?;
 
     Ok(Json(
         json!({ "imported": result.imported, "skipped": result.skipped }),
@@ -182,9 +192,10 @@ mod tests {
     async fn execute_rolls_back_import_when_profile_assignment_fails() {
         let data_dir = temp_data_dir("execute-profile-failure");
         let state = test_state(data_dir.clone());
-        ProfileRepository::new(&state.db)
-            .seed_default()
-            .expect("failed to seed profile");
+        let profile_id = ProfileRepository::new(&state.db)
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
         fail_profile_server_inserts(&state.db);
 
         let result = execute(
@@ -201,6 +212,7 @@ mod tests {
                     working_dir: None,
                     source: "test".to_string(),
                 }]),
+                profile_ids: vec![profile_id],
             }),
         )
         .await;
@@ -217,6 +229,25 @@ mod tests {
         }
         assert!(ids.is_empty());
 
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_an_empty_profile_scope() {
+        let data_dir = temp_data_dir("execute-profile-required");
+        let state = test_state(data_dir.clone());
+
+        let error = execute(
+            State(state),
+            axum::Json(ExecuteBody {
+                servers: Some(vec![]),
+                profile_ids: vec![],
+            }),
+        )
+        .await
+        .expect_err("empty profile scope should fail");
+
+        assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -240,7 +271,7 @@ mod tests {
         assert!(snippets.iter().all(|snippet| snippet["snippet"]
             .as_str()
             .unwrap_or("")
-            .contains("MOOR_MCP_TOKEN")));
+            .contains("MOOR_PROFILE_TOKEN")));
         assert!(!value.to_string().contains("test-mcp-token"));
         let _ = std::fs::remove_dir_all(data_dir);
     }

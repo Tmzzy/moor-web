@@ -3,7 +3,7 @@
 
 use super::Database;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,7 @@ pub struct ServerInsertInput {
     pub headers: Option<HashMap<String, String>>,
     pub working_dir: Option<String>,
     pub auto_start: bool,
+    pub profile_ids: Vec<String>,
 }
 
 fn serialize_nullable_text<T: serde::Serialize>(
@@ -149,14 +150,16 @@ impl<'a> ServerRepository<'a> {
         Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
 
-    /// 事务内批量插入 mcp_servers,并把每条新服务器挂到当前活动 profile 上。
-    /// SQL、JSON 序列化和 profile_servers 关联保持在 db 模块内。
-    pub fn insert_batch_with_active_profile(
+    /// 事务内批量插入 mcp_servers,并把每条新服务器挂到显式指定的 profiles。
+    pub fn insert_batch_with_profiles(
         &self,
         inputs: &[ServerInsertInput],
     ) -> Result<Vec<Server>, String> {
         if inputs.is_empty() {
             return Ok(vec![]);
+        }
+        if inputs.iter().any(|input| input.profile_ids.is_empty()) {
+            return Err("at least one profileId is required".to_string());
         }
         self.db.transaction(|conn| {
             let mut next_sort_order = match conn.query_row(
@@ -168,16 +171,6 @@ impl<'a> ServerRepository<'a> {
                 Ok(None) => 0,
                 Err(e) => return Err(e.to_string()),
             };
-            let active_profile_id = match conn.query_row(
-                "SELECT id FROM profiles WHERE is_active = 1",
-                [],
-                |row| row.get::<_, String>(0),
-            ) {
-                Ok(id) => Some(id),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(e.to_string()),
-            };
-
             let mut servers = Vec::with_capacity(inputs.len());
             for input in inputs {
                 let id = uuid::Uuid::new_v4().to_string();
@@ -207,7 +200,18 @@ impl<'a> ServerRepository<'a> {
                 )
                 .map_err(|e| e.to_string())?;
 
-                if let Some(profile_id) = &active_profile_id {
+                let profile_ids = input.profile_ids.iter().collect::<HashSet<_>>();
+                for profile_id in profile_ids {
+                    let profile_exists = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM profiles WHERE id = ?1)",
+                            [profile_id],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if !profile_exists {
+                        return Err(format!("Profile {profile_id} not found"));
+                    }
                     conn.execute(
                         "INSERT OR IGNORE INTO profile_servers (profile_id, server_id, enabled, disabled_tools) VALUES (?1, ?2, 1, '[]')",
                         rusqlite::params![profile_id, &id],
@@ -230,8 +234,8 @@ impl<'a> ServerRepository<'a> {
     }
 
     /// 测试专用:用指定 id/时间戳/sort_order 插入单行,字段以结构体形式传入。
-    /// 生产路径请用 [insert_batch_with_active_profile],它会自动生成标识符
-    /// 并把新服务器挂到活动 profile 上。
+    /// 生产路径请用 [insert_batch_with_profiles],它会自动生成标识符,
+    /// 并把新服务器挂到指定 profile 上。
     #[cfg(test)]
     pub fn insert_one_with_id(
         &self,
@@ -289,6 +293,83 @@ impl<'a> ServerRepository<'a> {
         })
     }
 
+    pub fn find_profile_ids(&self, server_id: &str) -> Result<Vec<String>, String> {
+        self.db.query_all(
+            "SELECT ps.profile_id
+             FROM profile_servers ps
+             JOIN profiles p ON p.id = ps.profile_id
+             WHERE ps.server_id = ?1 AND ps.enabled = 1
+             ORDER BY p.created_at DESC, p.id ASC",
+            &[&server_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn replace_profile_ids(
+        &self,
+        server_id: &str,
+        profile_ids: &[String],
+    ) -> Result<Vec<String>, String> {
+        let requested: HashSet<&str> = profile_ids.iter().map(String::as_str).collect();
+        self.db.transaction(|conn| {
+            let server_exists = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE id = ?1)",
+                    [server_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !server_exists {
+                return Err(format!("Server {server_id} not found"));
+            }
+
+            for profile_id in &requested {
+                let profile_exists = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM profiles WHERE id = ?1)",
+                        [profile_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if !profile_exists {
+                    return Err(format!("Profile {profile_id} not found"));
+                }
+            }
+
+            let existing = {
+                let mut statement = conn
+                    .prepare("SELECT profile_id FROM profile_servers WHERE server_id = ?1")
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([server_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?
+            };
+
+            for profile_id in existing {
+                if !requested.contains(profile_id.as_str()) {
+                    conn.execute(
+                        "UPDATE profile_servers SET enabled = 0 WHERE profile_id = ?1 AND server_id = ?2",
+                        rusqlite::params![&profile_id, server_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+            for profile_id in &requested {
+                conn.execute(
+                    "INSERT INTO profile_servers (profile_id, server_id, enabled, disabled_tools)
+                     VALUES (?1, ?2, 1, '[]')
+                     ON CONFLICT(profile_id, server_id) DO UPDATE SET enabled = 1",
+                    rusqlite::params![profile_id, server_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })?;
+        self.find_profile_ids(server_id)
+    }
+
     pub fn reorder(&self, ids: &[String]) -> Result<(), String> {
         let now = chrono::Utc::now().to_rfc3339();
         self.db.transaction(|conn| {
@@ -340,7 +421,7 @@ mod tests {
         db
     }
 
-    fn sample_input(name: &str) -> ServerInsertInput {
+    fn sample_input(name: &str, profile_ids: Vec<String>) -> ServerInsertInput {
         ServerInsertInput {
             name: name.into(),
             connection_type: "stdio".into(),
@@ -351,6 +432,7 @@ mod tests {
             headers: None,
             working_dir: None,
             auto_start: false,
+            profile_ids,
         }
     }
 
@@ -358,13 +440,17 @@ mod tests {
     fn find_by_ids_preserves_requested_order_and_skips_missing() {
         let db = temp_db();
         let repo = ServerRepository::new(&db);
+        let profile_id = crate::core::db::profile_repo::ProfileRepository::new(&db)
+            .create("Test")
+            .expect("create profile")
+            .id;
         let first = repo
-            .insert_batch_with_active_profile(&[sample_input("first")])
+            .insert_batch_with_profiles(&[sample_input("first", vec![profile_id.clone()])])
             .expect("insert first")[0]
             .id
             .clone();
         let second = repo
-            .insert_batch_with_active_profile(&[sample_input("second")])
+            .insert_batch_with_profiles(&[sample_input("second", vec![profile_id])])
             .expect("insert second")[0]
             .id
             .clone();
@@ -383,9 +469,17 @@ mod tests {
     fn insert_batch_assigns_decreasing_sort_order_and_returns_full_rows() {
         let db = temp_db();
         let repo = ServerRepository::new(&db);
-        let inputs = vec![sample_input("a"), sample_input("b"), sample_input("c")];
+        let profile_id = crate::core::db::profile_repo::ProfileRepository::new(&db)
+            .create("Test")
+            .expect("create profile")
+            .id;
+        let inputs = vec![
+            sample_input("a", vec![profile_id.clone()]),
+            sample_input("b", vec![profile_id.clone()]),
+            sample_input("c", vec![profile_id]),
+        ];
         let servers = repo
-            .insert_batch_with_active_profile(&inputs)
+            .insert_batch_with_profiles(&inputs)
             .expect("insert batch");
 
         assert_eq!(servers.len(), 3);
@@ -404,9 +498,74 @@ mod tests {
     fn insert_batch_with_empty_input_returns_empty_vec() {
         let db = temp_db();
         let repo = ServerRepository::new(&db);
-        let servers = repo
-            .insert_batch_with_active_profile(&[])
-            .expect("empty batch");
+        let servers = repo.insert_batch_with_profiles(&[]).expect("empty batch");
         assert!(servers.is_empty());
+    }
+
+    #[test]
+    fn insert_batch_assigns_one_server_to_multiple_profiles() {
+        let db = temp_db();
+        let profile_repo = crate::core::db::profile_repo::ProfileRepository::new(&db);
+        profile_repo.seed_initial().expect("seed initial profile");
+        let main_id = profile_repo
+            .find_all()
+            .expect("query initial profile")
+            .remove(0)
+            .id;
+        let work_id = profile_repo.create("Work").expect("create work profile").id;
+        let input = sample_input("shared", vec![main_id.clone(), work_id.clone()]);
+
+        let server = ServerRepository::new(&db)
+            .insert_batch_with_profiles(&[input])
+            .expect("insert shared server")
+            .remove(0);
+        let assigned = ServerRepository::new(&db)
+            .find_profile_ids(&server.id)
+            .expect("query assigned profiles");
+
+        assert_eq!(
+            assigned.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([main_id, work_id])
+        );
+    }
+
+    #[test]
+    fn replacing_profiles_preserves_tool_preferences_when_reenabled() {
+        let db = temp_db();
+        let profile_repo = crate::core::db::profile_repo::ProfileRepository::new(&db);
+        profile_repo.seed_initial().expect("seed initial profile");
+        let profile_id = profile_repo
+            .find_all()
+            .expect("query initial profile")
+            .remove(0)
+            .id;
+        let server = ServerRepository::new(&db)
+            .insert_batch_with_profiles(&[sample_input("shared", vec![profile_id.clone()])])
+            .expect("insert server")
+            .remove(0);
+        profile_repo
+            .upsert_profile_server(
+                &profile_id,
+                &server.id,
+                Some(true),
+                Some(&vec!["dangerous".to_string()]),
+            )
+            .expect("set disabled tool");
+
+        let repo = ServerRepository::new(&db);
+        repo.replace_profile_ids(&server.id, &[])
+            .expect("disable profile assignment");
+        repo.replace_profile_ids(&server.id, std::slice::from_ref(&profile_id))
+            .expect("reenable profile assignment");
+        let state = profile_repo
+            .find_profile_servers(&profile_id)
+            .expect("query profile servers")
+            .into_iter()
+            .find(|entry| entry.server.id == server.id)
+            .expect("server should be present")
+            .profile_server;
+
+        assert_eq!(state.disabled_tools, vec!["dangerous"]);
+        assert!(state.enabled);
     }
 }

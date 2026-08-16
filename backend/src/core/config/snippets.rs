@@ -27,7 +27,7 @@ pub fn generate_snippets(mcp_url: &str) -> Vec<ClientSnippet> {
         env: None,
         headers: Some(HashMap::from([(
             "Authorization".to_string(),
-            "Bearer {env:MOOR_MCP_TOKEN}".to_string(),
+            "Bearer {env:MOOR_PROFILE_TOKEN}".to_string(),
         )])),
         working_dir: None,
     };
@@ -61,14 +61,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_snippets_reference_the_mcp_token_environment_variable() {
+    fn generated_snippets_reference_the_profile_token_environment_variable() {
         let snippets = generate_snippets("https://moor.example/mcp");
 
         let expected_token_references = [
-            ("Claude Code", "Bearer ${MOOR_MCP_TOKEN}"),
-            ("Codex", "bearer_token_env_var = \"MOOR_MCP_TOKEN\""),
-            ("OpenCode", "Bearer {env:MOOR_MCP_TOKEN}"),
-            ("Cursor", "Bearer ${env:MOOR_MCP_TOKEN}"),
+            ("Claude Code", "Bearer ${MOOR_PROFILE_TOKEN}"),
+            ("Codex", "bearer_token_env_var = \"MOOR_PROFILE_TOKEN\""),
+            ("OpenCode", "Bearer {env:MOOR_PROFILE_TOKEN}"),
+            ("Cursor", "Bearer ${env:MOOR_PROFILE_TOKEN}"),
         ];
         assert_eq!(snippets.len(), expected_token_references.len());
         for (client, token_reference) in expected_token_references {

@@ -8,6 +8,7 @@ import { DetailPageHeader } from "@/components/shared/DetailPageHeader";
 import { PageLoading } from "@/components/shared/PageLoading";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { cn } from "@/lib/utils";
+import { McpTokenPanel } from "@/components/security/McpTokenPanel";
 
 export function ProfileDetail() {
   const { id } = useParams<{ id: string }>();
@@ -35,19 +36,10 @@ export function ProfileDetail() {
       <DetailPageHeader
         title={profile.name}
         subtitle={`${enabledCount} of ${profile.servers.length} servers enabled`}
-        badge={
-          profile.isActive ? (
-            <Badge variant="success">
-              <span className="relative flex h-1.5 w-1.5 mr-1.5">
-                <span className="animate-ping-slow absolute inline-flex h-full w-full rounded-full bg-success-muted opacity-50" />
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-success-muted" />
-              </span>
-              Active
-            </Badge>
-          ) : undefined
-        }
         onBack={() => navigate("/profiles")}
       />
+
+      <McpTokenPanel key={profile.id} profileId={profile.id} profileName={profile.name} />
 
       {/* Server Selection */}
       <Card>

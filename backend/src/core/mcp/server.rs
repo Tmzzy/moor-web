@@ -14,12 +14,13 @@ pub async fn handle_request(
     method: &str,
     params: Option<serde_json::Value>,
     state: Arc<AppState>,
+    profile_id: &str,
     agent_info: Option<&str>,
 ) -> serde_json::Value {
     match method {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id, state).await,
-        "tools/call" => handle_tools_call(id, params, state, agent_info).await,
+        "tools/list" => handle_tools_list(id, state, profile_id).await,
+        "tools/call" => handle_tools_call(id, params, state, profile_id, agent_info).await,
         "ping" => jsonrpc::make_response(id, serde_json::json!({})),
         _ => jsonrpc::make_error(
             id,
@@ -40,8 +41,12 @@ fn handle_initialize(id: jsonrpc::Id) -> serde_json::Value {
     )
 }
 
-async fn handle_tools_list(id: jsonrpc::Id, state: Arc<AppState>) -> serde_json::Value {
-    let catalog = state.server_manager.get_tool_catalog(None).await;
+async fn handle_tools_list(
+    id: jsonrpc::Id,
+    state: Arc<AppState>,
+    profile_id: &str,
+) -> serde_json::Value {
+    let catalog = state.server_manager.get_tool_catalog(profile_id).await;
     let tools: Vec<serde_json::Value> = catalog
         .iter()
         .map(|tool| {
@@ -63,6 +68,7 @@ async fn handle_tools_call(
     id: jsonrpc::Id,
     params: Option<serde_json::Value>,
     state: Arc<AppState>,
+    profile_id: &str,
     agent_info: Option<&str>,
 ) -> serde_json::Value {
     let params = match params {
@@ -78,7 +84,7 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    let catalog = state.server_manager.get_tool_catalog(None).await;
+    let catalog = state.server_manager.get_tool_catalog(profile_id).await;
     let owner = match catalog
         .iter()
         .find(|t| t.exposed_name == tool_name)
@@ -90,6 +96,7 @@ async fn handle_tools_call(
             AuditRecorder::record(
                 &state.db,
                 ToolCallRecord {
+                    profile_id,
                     server_id: None,
                     tool_name,
                     arguments: &arguments,
@@ -106,13 +113,14 @@ async fn handle_tools_call(
     let start_time = std::time::Instant::now();
     match state
         .server_manager
-        .call_tool(tool_name, arguments.clone())
+        .call_tool(profile_id, tool_name, arguments.clone())
         .await
     {
         Ok(result) => {
             AuditRecorder::record(
                 &state.db,
                 ToolCallRecord {
+                    profile_id,
                     server_id: Some(&owner.server_id),
                     tool_name,
                     arguments: &arguments,
@@ -128,6 +136,7 @@ async fn handle_tools_call(
             AuditRecorder::record(
                 &state.db,
                 ToolCallRecord {
+                    profile_id,
                     server_id: Some(&owner.server_id),
                     tool_name,
                     arguments: &arguments,
@@ -205,7 +214,10 @@ process.stdin.on("data", (chunk) => {
         crate::core::services::settings::init_settings(db.as_ref(), &data_dir)
             .expect("failed to initialize settings");
         let profile_repo = ProfileRepository::new(&db);
-        profile_repo.seed_default().expect("failed to seed profile");
+        let profile_id = profile_repo
+            .create("Test")
+            .expect("failed to create profile")
+            .id;
 
         let server_id = uuid::Uuid::new_v4().to_string();
         let server_repo = ServerRepository::new(&db);
@@ -223,11 +235,12 @@ process.stdin.on("data", (chunk) => {
                     headers: None,
                     working_dir: None,
                     auto_start: false,
+                    profile_ids: vec![],
                 },
             )
             .expect("failed to insert server");
         profile_repo
-            .assign_to_active_profile(std::slice::from_ref(&server_id))
+            .assign_to_profile(&profile_id, std::slice::from_ref(&server_id))
             .expect("failed to assign server");
 
         let event_bus = Arc::new(EventBus::new(16));
@@ -244,7 +257,6 @@ process.stdin.on("data", (chunk) => {
                 "test".to_string(),
                 "test-password".to_string(),
             ),
-            crate::core::http::McpAuth::bearer("test-mcp-token".to_string()),
             "test".to_string(),
             19323,
             "http://localhost:19323".to_string(),
@@ -258,6 +270,7 @@ process.stdin.on("data", (chunk) => {
             "tools/list",
             None,
             app_state.clone(),
+            &profile_id,
             Some("test-agent"),
         )
         .await;
@@ -277,6 +290,7 @@ process.stdin.on("data", (chunk) => {
                 "arguments": { "token": "secret", "value": "ok" }
             })),
             app_state,
+            &profile_id,
             Some("test-agent"),
         )
         .await;
@@ -292,6 +306,7 @@ process.stdin.on("data", (chunk) => {
             .query_logs(None, Some("fake__echo"), None, None, Some(10), None)
             .expect("failed to query audit logs");
         assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].profile_id.as_deref(), Some(profile_id.as_str()));
         assert_eq!(logs[0].server_id.as_deref(), Some(server_id.as_str()));
         assert_eq!(logs[0].arguments.as_ref().unwrap()["token"], "[REDACTED]");
 

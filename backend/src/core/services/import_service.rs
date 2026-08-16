@@ -5,7 +5,7 @@ use crate::core::config::import_parser::ScannedServer;
 use crate::core::config::scanner;
 use crate::core::db::Database;
 use crate::core::services::server_manager::ServerManager;
-use crate::core::services::server_service::{CreateServerInput, ServerService};
+use crate::core::services::server_service::{CreateServerInput, ServerService, ServerServiceError};
 use std::sync::Arc;
 
 pub struct ImportResult {
@@ -17,7 +17,8 @@ pub async fn execute_import(
     db: &Arc<Database>,
     server_manager: &Arc<ServerManager>,
     servers: Option<Vec<ScannedServer>>,
-) -> Result<ImportResult, String> {
+    profile_ids: &[String],
+) -> Result<ImportResult, ServerServiceError> {
     let existing_names = ServerService::find_all_names(db);
     let all_servers = match servers {
         Some(s) if !s.is_empty() => s,
@@ -37,6 +38,7 @@ pub async fn execute_import(
             headers: sc.headers.clone(),
             working_dir: sc.working_dir.clone(),
             auto_start: false,
+            profile_ids: profile_ids.to_vec(),
         })
         .collect();
 

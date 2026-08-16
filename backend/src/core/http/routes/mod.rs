@@ -6,6 +6,5 @@ pub mod health;
 pub mod import_routes;
 pub mod logs;
 pub mod profiles;
-pub mod security;
 pub mod servers;
 pub mod settings;

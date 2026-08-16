@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct Profile {
     pub id: String,
     pub name: String,
-    pub is_active: bool,
     pub server_count: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
@@ -31,12 +30,10 @@ pub struct ProfileDetailServer {
 }
 
 fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
-    let is_active: i64 = row.get("is_active")?;
     let server_count: Option<i64> = row.get("server_count")?;
     Ok(Profile {
         id: row.get("id")?,
         name: row.get("name")?,
-        is_active: is_active != 0,
         server_count,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -54,7 +51,7 @@ impl<'a> ProfileRepository<'a> {
 
     pub fn find_all(&self) -> Result<Vec<Profile>, String> {
         self.db.query_all(
-            "SELECT p.*, COUNT(ps.server_id) as server_count
+            "SELECT p.*, COUNT(CASE WHEN ps.enabled = 1 THEN ps.server_id END) as server_count
              FROM profiles p
              LEFT JOIN profile_servers ps ON p.id = ps.profile_id
              GROUP BY p.id
@@ -66,7 +63,7 @@ impl<'a> ProfileRepository<'a> {
 
     pub fn find_by_id(&self, id: &str) -> Result<Option<Profile>, String> {
         self.db.query_one(
-            "SELECT p.*, COUNT(ps.server_id) as server_count
+            "SELECT p.*, COUNT(CASE WHEN ps.enabled = 1 THEN ps.server_id END) as server_count
              FROM profiles p
              LEFT JOIN profile_servers ps ON p.id = ps.profile_id
              WHERE p.id = ?1
@@ -76,19 +73,48 @@ impl<'a> ProfileRepository<'a> {
         )
     }
 
-    pub fn find_active_id(&self) -> Result<Option<String>, String> {
-        self.db
-            .query_one("SELECT id FROM profiles WHERE is_active = 1", &[], |row| {
-                row.get(0)
-            })
+    pub fn find_id_by_mcp_token(&self, token: &str) -> Result<Option<String>, String> {
+        self.db.query_one(
+            "SELECT id FROM profiles WHERE mcp_token = ?1",
+            &[&token],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn find_mcp_token(&self, id: &str) -> Result<Option<String>, String> {
+        self.db.query_one(
+            "SELECT mcp_token FROM profiles WHERE id = ?1",
+            &[&id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn rotate_mcp_token(&self, id: &str) -> Result<Option<String>, String> {
+        let exists = self
+            .db
+            .query_one("SELECT id FROM profiles WHERE id = ?1", &[&id], |row| {
+                row.get::<_, String>(0)
+            })?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        let token = crate::core::services::mcp_token::generate()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        self.db.run(
+            "UPDATE profiles SET mcp_token = ?1, updated_at = ?2 WHERE id = ?3",
+            &[&token, &now, &id],
+        )?;
+        Ok(Some(token))
     }
 
     pub fn create(&self, name: &str) -> Result<Profile, String> {
         let id = uuid::Uuid::new_v4().to_string();
+        let token = crate::core::services::mcp_token::generate()?;
         let now = chrono::Utc::now().to_rfc3339();
         self.db.run(
-            "INSERT INTO profiles (id, name, is_active, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?4)",
-            &[&id, &name, &now, &now],
+            "INSERT INTO profiles (id, name, mcp_token, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[&id, &name, &token, &now, &now],
         )?;
         self.find_by_id(&id)
             .and_then(|p| p.ok_or_else(|| "Created profile could not be reloaded".into()))
@@ -113,43 +139,27 @@ impl<'a> ProfileRepository<'a> {
         self.find_by_id(id)
     }
 
-    pub fn activate(&self, id: &str) -> Result<Option<Profile>, String> {
-        let exists = self
-            .db
-            .query_one("SELECT id FROM profiles WHERE id = ?1", &[&id], |row| {
-                row.get::<_, String>(0)
-            })?;
-        if exists.is_none() {
-            return Ok(None);
+    pub fn remove(&self, id: &str) -> Result<RemoveResult, String> {
+        let existing =
+            self.db
+                .query_one("SELECT id FROM profiles WHERE id = ?1", &[&id], |row| {
+                    row.get::<_, String>(0)
+                })?;
+        if existing.is_none() {
+            return Ok(RemoveResult::NotFound);
         }
+
         self.db.transaction(|conn| {
-            conn.execute("UPDATE profiles SET is_active = 0 WHERE id != ?1", [id])
-                .map_err(|e| e.to_string())?;
-            let now = chrono::Utc::now().to_rfc3339();
             conn.execute(
-                "UPDATE profiles SET is_active = 1, updated_at = ?1 WHERE id = ?2",
-                rusqlite::params![&now, &id],
+                "UPDATE audit_logs SET profile_id = NULL WHERE profile_id = ?1",
+                [id],
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
+            conn.execute("DELETE FROM profiles WHERE id = ?1", [id])
+                .map_err(|error| error.to_string())?;
             Ok(())
         })?;
-        self.find_by_id(id)
-    }
-
-    pub fn remove(&self, id: &str) -> Result<RemoveResult, String> {
-        let existing = self.db.query_one(
-            "SELECT id, is_active FROM profiles WHERE id = ?1",
-            &[&id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        match existing {
-            None => Ok(RemoveResult::NotFound),
-            Some((_, is_active)) if is_active != 0 => Ok(RemoveResult::Active),
-            Some(_) => {
-                self.db.run("DELETE FROM profiles WHERE id = ?1", &[&id])?;
-                Ok(RemoveResult::Success)
-            }
-        }
+        Ok(RemoveResult::Success)
     }
 
     pub fn find_profile_servers(
@@ -230,76 +240,49 @@ impl<'a> ProfileRepository<'a> {
         })
     }
 
-    pub fn find_active_profile_server_ids(&self) -> Result<Vec<String>, String> {
-        let active_id = self.find_active_id()?;
-        let Some(active_id) = active_id else {
-            return Ok(vec![]);
-        };
+    pub fn find_enabled_server_ids(&self) -> Result<Vec<String>, String> {
         self.db.query_all(
-            "SELECT server_id FROM profile_servers WHERE profile_id = ?1 AND enabled = 1",
-            &[&active_id],
+            "SELECT DISTINCT server_id FROM profile_servers WHERE enabled = 1",
+            &[],
             |row| row.get(0),
         )
     }
 
     #[cfg(test)]
-    pub fn assign_to_active_profile(&self, server_ids: &[String]) -> Result<(), String> {
-        let active =
-            self.db
-                .query_one("SELECT id FROM profiles WHERE is_active = 1", &[], |row| {
-                    row.get::<_, String>(0)
-                })?;
-        let Some(active_id) = active else {
-            return Ok(());
-        };
+    pub fn assign_to_profile(&self, profile_id: &str, server_ids: &[String]) -> Result<(), String> {
         for server_id in server_ids {
             self.db.run(
                 "INSERT OR IGNORE INTO profile_servers (profile_id, server_id, enabled, disabled_tools) VALUES (?1, ?2, 1, '[]')",
-                &[&active_id, &server_id],
+                &[&profile_id, &server_id],
             )?;
         }
         Ok(())
     }
 
-    pub fn seed_default(&self) -> Result<(), String> {
-        let existing_profiles =
-            self.db
-                .query_all("SELECT id, is_active FROM profiles", &[], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?;
-        if existing_profiles
-            .iter()
-            .any(|(_, is_active)| *is_active != 0)
-        {
+    pub fn seed_initial(&self) -> Result<(), String> {
+        let profile_count = self
+            .db
+            .query_one("SELECT COUNT(*) FROM profiles", &[], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .unwrap_or_default();
+        if profile_count > 0 {
             return Ok(());
         }
 
-        let rows = self.db.query_all(
-            "SELECT id FROM profiles WHERE name = 'Default'",
-            &[],
-            |row| row.get::<_, String>(0),
-        )?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let token = crate::core::services::mcp_token::generate()?;
         let now = chrono::Utc::now().to_rfc3339();
-        if rows.is_empty() {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.db.run(
-                "INSERT INTO profiles (id, name, is_active, created_at, updated_at) VALUES (?1, ?2, 1, ?3, ?4)",
-                &[&id, &"Default", &now, &now],
-            )?;
-        } else {
-            self.db.run(
-                "UPDATE profiles SET is_active = 1, updated_at = ?1 WHERE id = ?2",
-                &[&now, &rows[0]],
-            )?;
-        }
-        Ok(())
+        self.db.run(
+            "INSERT INTO profiles (id, name, mcp_token, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[&id, &"Main", &token, &now, &now],
+        )
     }
 }
 
 pub enum RemoveResult {
     Success,
     NotFound,
-    Active,
 }
 
 #[cfg(test)]
@@ -319,19 +302,35 @@ mod tests {
     }
 
     #[test]
-    fn seed_default_preserves_existing_active_profile() {
-        let db_path = temp_db_path("preserve-active");
+    fn seed_initial_preserves_existing_profiles() {
+        let db_path = temp_db_path("preserve-existing");
         std::fs::create_dir_all(db_path.parent().unwrap()).expect("failed to create temp db dir");
         let db = Database::open(&db_path).expect("failed to open temp db");
         db.run_migrations().expect("failed to migrate temp db");
         let repo = ProfileRepository::new(&db);
         let first = repo.create("Work").expect("failed to create profile");
-        repo.activate(&first.id)
-            .expect("failed to activate profile");
 
-        repo.seed_default().expect("failed to seed default");
+        repo.seed_initial().expect("failed to seed initial profile");
 
-        assert_eq!(repo.find_active_id().unwrap(), Some(first.id));
+        let profiles = repo.find_all().expect("failed to list profiles");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, first.id);
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn seed_initial_creates_main_profile_for_an_empty_database() {
+        let db_path = temp_db_path("create-main");
+        std::fs::create_dir_all(db_path.parent().unwrap()).expect("failed to create temp db dir");
+        let db = Database::open(&db_path).expect("failed to open temp db");
+        db.run_migrations().expect("failed to migrate temp db");
+        let repo = ProfileRepository::new(&db);
+
+        repo.seed_initial().expect("failed to seed initial profile");
+
+        let profiles = repo.find_all().expect("failed to list profiles");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Main");
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
     }
 }

@@ -142,7 +142,7 @@ export interface CreateForm extends EditForm {
   autoStart: boolean;
 }
 
-export function formToCreateInput(form: CreateForm): ServerCreateInput {
+export function formToCreateInput(form: CreateForm): Omit<ServerCreateInput, "profileIds"> {
   const base = {
     name: form.name.trim(),
     connectionType: form.connectionType,

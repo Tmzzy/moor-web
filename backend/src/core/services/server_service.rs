@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
 
+use crate::core::db::profile_repo::ProfileRepository;
 use crate::core::db::server_repo::{Server, ServerInsertInput, ServerRepository};
 use crate::core::db::Database;
 use crate::core::services::server_manager::ServerManager;
@@ -18,6 +19,7 @@ pub struct CreateServerInput {
     pub headers: Option<HashMap<String, String>>,
     pub working_dir: Option<String>,
     pub auto_start: bool,
+    pub profile_ids: Vec<String>,
 }
 
 impl CreateServerInput {
@@ -34,6 +36,9 @@ impl CreateServerInput {
             }
             "stdio" | "http" => {}
             _ => return Err("connectionType must be 'stdio' or 'http'".into()),
+        }
+        if self.profile_ids.is_empty() {
+            return Err("at least one profileId is required".into());
         }
         Ok(())
     }
@@ -150,12 +155,11 @@ impl ServerService {
         db: &Database,
         server_manager: &Arc<ServerManager>,
         input: &CreateServerInput,
-    ) -> Result<Server, String> {
+    ) -> Result<Server, ServerServiceError> {
         let servers = Self::insert_servers(db, server_manager, std::slice::from_ref(input)).await?;
-        let server = servers
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Created server could not be reloaded".to_string())?;
+        let server = servers.into_iter().next().ok_or_else(|| {
+            ServerServiceError::Internal("Created server could not be reloaded".to_string())
+        })?;
 
         Ok(server)
     }
@@ -165,7 +169,7 @@ impl ServerService {
         db: &Database,
         server_manager: &Arc<ServerManager>,
         inputs: &[CreateServerInput],
-    ) -> Result<Vec<Server>, String> {
+    ) -> Result<Vec<Server>, ServerServiceError> {
         let servers = Self::insert_servers_transaction(db, inputs)?;
 
         for server in &servers {
@@ -178,13 +182,28 @@ impl ServerService {
     fn insert_servers_transaction(
         db: &Database,
         inputs: &[CreateServerInput],
-    ) -> Result<Vec<Server>, String> {
+    ) -> Result<Vec<Server>, ServerServiceError> {
+        let known_profile_ids: HashSet<String> = ProfileRepository::new(db)
+            .find_all()
+            .map_err(ServerServiceError::Internal)?
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
         // 校验集中在 service 层(repo 只管持久化);通过后把领域字段映射成
         // repo 的输入结构体,事务 SQL 全部由 ServerRepository 内部处理。
         let repo_inputs: Vec<ServerInsertInput> = inputs
             .iter()
-            .map(|i| -> Result<ServerInsertInput, String> {
-                i.validate()?;
+            .map(|i| -> Result<ServerInsertInput, ServerServiceError> {
+                i.validate().map_err(ServerServiceError::Validation)?;
+                if let Some(missing) = i
+                    .profile_ids
+                    .iter()
+                    .find(|profile_id| !known_profile_ids.contains(*profile_id))
+                {
+                    return Err(ServerServiceError::Validation(format!(
+                        "Profile {missing} not found"
+                    )));
+                }
                 Ok(ServerInsertInput {
                     name: i.name.clone(),
                     connection_type: i.connection_type.clone(),
@@ -195,10 +214,13 @@ impl ServerService {
                     headers: i.headers.clone(),
                     working_dir: i.working_dir.clone(),
                     auto_start: i.auto_start,
+                    profile_ids: i.profile_ids.clone(),
                 })
             })
             .collect::<Result<_, _>>()?;
-        ServerRepository::new(db).insert_batch_with_active_profile(&repo_inputs)
+        ServerRepository::new(db)
+            .insert_batch_with_profiles(&repo_inputs)
+            .map_err(ServerServiceError::Internal)
     }
 
     pub fn list_servers(db: &Database) -> Result<Vec<Server>, String> {
@@ -207,6 +229,48 @@ impl ServerService {
 
     pub fn get_server(db: &Database, id: &str) -> Result<Option<Server>, String> {
         ServerRepository::new(db).find_by_id(id)
+    }
+
+    pub fn get_server_profile_ids(
+        db: &Database,
+        id: &str,
+    ) -> Result<Vec<String>, ServerServiceError> {
+        ServerRepository::new(db)
+            .find_by_id(id)
+            .map_err(ServerServiceError::Internal)?
+            .ok_or_else(|| ServerServiceError::NotFound("Server not found".into()))?;
+        ServerRepository::new(db)
+            .find_profile_ids(id)
+            .map_err(ServerServiceError::Internal)
+    }
+
+    pub fn update_server_profile_ids(
+        db: &Database,
+        id: &str,
+        profile_ids: &[String],
+    ) -> Result<Vec<String>, ServerServiceError> {
+        let known_profile_ids: HashSet<String> = ProfileRepository::new(db)
+            .find_all()
+            .map_err(ServerServiceError::Internal)?
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        if let Some(missing) = profile_ids
+            .iter()
+            .find(|profile_id| !known_profile_ids.contains(*profile_id))
+        {
+            return Err(ServerServiceError::Validation(format!(
+                "Profile {missing} not found"
+            )));
+        }
+
+        ServerRepository::new(db)
+            .find_by_id(id)
+            .map_err(ServerServiceError::Internal)?
+            .ok_or_else(|| ServerServiceError::NotFound("Server not found".into()))?;
+        ServerRepository::new(db)
+            .replace_profile_ids(id, profile_ids)
+            .map_err(ServerServiceError::Internal)
     }
 
     pub async fn update_server(
@@ -351,6 +415,30 @@ impl ServerService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_create_input(profile_ids: Vec<String>) -> CreateServerInput {
+        CreateServerInput {
+            name: "Test".to_string(),
+            connection_type: "stdio".to_string(),
+            command: Some("node".to_string()),
+            args: None,
+            url: None,
+            env: None,
+            headers: None,
+            working_dir: None,
+            auto_start: false,
+            profile_ids,
+        }
+    }
+
+    #[test]
+    fn create_server_input_rejects_an_empty_profile_scope() {
+        let error = valid_create_input(vec![])
+            .validate()
+            .expect_err("empty profile scope should fail");
+
+        assert_eq!(error, "at least one profileId is required");
+    }
 
     #[test]
     fn update_server_input_rejects_invalid_json_shapes() {

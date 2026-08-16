@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified from the original Moor project for this Web/Docker distribution; see NOTICE.
 
-use crate::core::http::AppState;
+use crate::core::http::{AppState, McpProfileContext};
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -15,6 +15,13 @@ pub async fn handle_mcp_request(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
 ) -> Response {
+    let Some(profile_id) = req
+        .extensions()
+        .get::<McpProfileContext>()
+        .map(|context| context.profile_id.clone())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let headers = req.headers().clone();
     let accept = headers
         .get(header::ACCEPT)
@@ -81,6 +88,7 @@ pub async fn handle_mcp_request(
         &method,
         params,
         state.clone(),
+        &profile_id,
         agent_info.as_deref(),
     )
     .await;

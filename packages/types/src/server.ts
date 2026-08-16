@@ -30,6 +30,7 @@ export interface ServerRuntime {
 
 export interface ServerDetail extends Server {
   runtime: ServerRuntime;
+  profileIds: string[];
 }
 
 export interface ServerCreateInput {
@@ -42,6 +43,7 @@ export interface ServerCreateInput {
   headers?: Record<string, string>;
   workingDir?: string;
   autoStart?: boolean;
+  profileIds: string[];
 }
 
 export interface ServerUpdateInput {

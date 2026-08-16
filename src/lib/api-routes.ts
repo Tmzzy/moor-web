@@ -39,8 +39,9 @@ export const routes = {
     start: (id: string) => `/api/servers/${pathSegment(id)}/start`,
     stop: (id: string) => `/api/servers/${pathSegment(id)}/stop`,
     order: () => "/api/servers/order",
-    tools: (id: string, profileId?: string) =>
+    tools: (id: string, profileId: string) =>
       withQuery(`/api/servers/${pathSegment(id)}/tools`, { profile_id: profileId }),
+    profiles: (id: string) => `/api/servers/${pathSegment(id)}/profiles`,
   },
   profiles: {
     list: () => "/api/profiles",
@@ -48,18 +49,15 @@ export const routes = {
     create: () => "/api/profiles",
     update: (id: string) => `/api/profiles/${pathSegment(id)}`,
     delete: (id: string) => `/api/profiles/${pathSegment(id)}`,
-    activate: (id: string) => `/api/profiles/${pathSegment(id)}/activate`,
     updateServer: (profileId: string, serverId: string) =>
       `/api/profiles/${pathSegment(profileId)}/servers/${pathSegment(serverId)}`,
+    mcpToken: (id: string) => `/api/profiles/${pathSegment(id)}/mcp-token`,
+    rotateMcpToken: (id: string) => `/api/profiles/${pathSegment(id)}/mcp-token/rotate`,
   },
   settings: {
     get: () => "/api/settings",
     update: () => "/api/settings",
     reset: () => "/api/settings/reset",
-  },
-  security: {
-    mcpToken: () => "/api/security/mcp-token",
-    rotateMcpToken: () => "/api/security/mcp-token/rotate",
   },
   logs: {
     list: (params?: LogListParams) => withQuery("/api/logs", params ?? {}),

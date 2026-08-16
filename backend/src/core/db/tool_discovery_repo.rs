@@ -114,21 +114,14 @@ impl<'a> ToolDiscoveryRepository<'a> {
 
     pub fn find_disabled_tools_for_server(
         &self,
-        profile_id: Option<&str>,
+        profile_id: &str,
         server_id: &str,
     ) -> Result<std::collections::HashSet<String>, String> {
-        let rows = match profile_id {
-            Some(pid) => self.db.query_all(
-                "SELECT disabled_tools FROM profile_servers WHERE profile_id = ?1 AND server_id = ?2",
-                &[&pid, &server_id],
-                |row| row.get::<_, String>(0),
-            )?,
-            None => self.db.query_all(
-                "SELECT disabled_tools FROM profile_servers WHERE server_id = ?1",
-                &[&server_id],
-                |row| row.get::<_, String>(0),
-            )?,
-        };
+        let rows = self.db.query_all(
+            "SELECT disabled_tools FROM profile_servers WHERE profile_id = ?1 AND server_id = ?2",
+            &[&profile_id, &server_id],
+            |row| row.get::<_, String>(0),
+        )?;
         Ok(rows
             .iter()
             .flat_map(|s| serde_json::from_str::<Vec<String>>(s).unwrap_or_default())

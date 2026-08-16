@@ -5,6 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertTriangle, Check, FileJson, WandSparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { useConfigImport } from "@/hooks/useConfigImport";
+import { ProfileSelector } from "@/components/servers/ProfileSelector";
+import { useProfiles } from "@/hooks/useProfiles";
 
 const JsonImportEditor = lazy(() =>
   import("@/components/shared/JsonImportEditor").then((module) => ({
@@ -34,9 +36,11 @@ export function ConfigImportPanel({
   showJsonImport,
   onCloseJsonImport,
 }: ConfigImportPanelProps) {
+  const { profiles } = useProfiles();
   const {
     scanCandidates,
     selectedImports,
+    selectedProfileIds,
     scanStatus,
     importPreview,
     hasStaticAuthorizationHeader,
@@ -49,6 +53,7 @@ export function ConfigImportPanel({
     formatJson,
     parseJson,
     executeImport,
+    setSelectedProfileIds,
     toggleImport,
     clearScan,
   } = state;
@@ -227,10 +232,20 @@ export function ConfigImportPanel({
               </label>
             ))}
             {scanCandidates.length > 0 && (
-              <div className="flex justify-end pt-1">
-                <Button onClick={() => void executeImport()} disabled={selectedImports.size === 0}>
-                  Import Selected ({selectedImports.size})
-                </Button>
+              <div className="space-y-3 pt-1">
+                <ProfileSelector
+                  profiles={profiles}
+                  selectedIds={selectedProfileIds}
+                  onChange={setSelectedProfileIds}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => void executeImport()}
+                    disabled={selectedImports.size === 0 || selectedProfileIds.length === 0}
+                  >
+                    Import Selected ({selectedImports.size})
+                  </Button>
+                </div>
               </div>
             )}
           </CardContent>

@@ -6,11 +6,13 @@ use crate::core::http::AppState;
 use crate::core::services::profile_service::ProfileService;
 use axum::{
     extract::{Path, State},
+    http::{header, HeaderValue},
+    response::IntoResponse,
     response::Json,
-    routing::{get, put},
+    routing::{get, post},
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -21,11 +23,40 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/profiles/{id}",
             get(get_one).put(update).delete(remove),
         )
-        .route("/api/profiles/{id}/activate", put(activate))
+        .route("/api/profiles/{id}/mcp-token", get(get_mcp_token))
+        .route(
+            "/api/profiles/{id}/mcp-token/rotate",
+            post(rotate_mcp_token),
+        )
         .route(
             "/api/profiles/{profileId}/servers/{serverId}",
             get(get_profile_server).put(upsert_profile_server),
         )
+}
+
+#[derive(Serialize)]
+struct ProfileMcpTokenResponse {
+    token: String,
+}
+
+fn no_store_header() -> [(header::HeaderName, HeaderValue); 1] {
+    [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))]
+}
+
+async fn get_mcp_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let token = ProfileService::get_mcp_token(&state.db, &id).map_err(AppError::from)?;
+    Ok((no_store_header(), Json(ProfileMcpTokenResponse { token })))
+}
+
+async fn rotate_mcp_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let token = ProfileService::rotate_mcp_token(&state.db, &id).map_err(AppError::from)?;
+    Ok((no_store_header(), Json(ProfileMcpTokenResponse { token })))
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
@@ -95,17 +126,6 @@ async fn remove(
     Ok(Json(json!({ "success": true })))
 }
 
-async fn activate(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
-    let profile =
-        ProfileService::activate(&state.db, &state.event_bus, &id).map_err(AppError::from)?;
-    Ok(Json(
-        serde_json::to_value(profile).map_err(|e| AppError::internal(e.to_string()))?,
-    ))
-}
-
 async fn get_profile_server(
     State(state): State<Arc<AppState>>,
     Path((profile_id, server_id)): Path<(String, String)>,
@@ -164,26 +184,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_profile_accepts_frontend_put_route() {
-        let data_dir = temp_data_dir("activate-put");
+    async fn profile_token_endpoint_reveals_and_rotates_only_that_profile_token() {
+        let data_dir = temp_data_dir("profile-token");
         let state = test_state(data_dir.clone());
-        let repo = ProfileRepository::new(&state.db);
-        repo.seed_default().expect("failed to seed profile");
-        let profile = repo.create("Work").expect("failed to create profile");
+        let profile = ProfileRepository::new(&state.db)
+            .create("Work")
+            .expect("failed to create profile");
+        let app = router().with_state(state.clone());
 
-        let response = router()
-            .with_state(state)
+        let current = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .method(axum::http::Method::PUT)
-                    .uri(format!("/api/profiles/{}/activate", profile.id))
+                    .uri(format!("/api/profiles/{}/mcp-token", profile.id))
                     .body(Body::empty())
                     .expect("request should build"),
             )
             .await
-            .expect("route should respond");
+            .expect("token route should respond");
+        assert_eq!(current.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            current.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let current_body = axum::body::to_bytes(current.into_body(), usize::MAX)
+            .await
+            .expect("read token response");
+        let current_token = serde_json::from_slice::<serde_json::Value>(&current_body)
+            .expect("token response should be JSON")["token"]
+            .as_str()
+            .expect("token should be present")
+            .to_string();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let rotated = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(format!("/api/profiles/{}/mcp-token/rotate", profile.id))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("rotation route should respond");
+        let rotated_body = axum::body::to_bytes(rotated.into_body(), usize::MAX)
+            .await
+            .expect("read rotated token response");
+        let rotated_token = serde_json::from_slice::<serde_json::Value>(&rotated_body)
+            .expect("rotation response should be JSON")["token"]
+            .as_str()
+            .expect("rotated token should be present")
+            .to_string();
+
+        assert_ne!(current_token, rotated_token);
+        assert_eq!(
+            ProfileRepository::new(&state.db)
+                .find_mcp_token(&profile.id)
+                .expect("query stored token")
+                .as_deref(),
+            Some(rotated_token.as_str())
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }
