@@ -7,6 +7,7 @@ use crate::core::db::tool_discovery_repo::{ToolDiscoveryRepository, ToolInsert};
 use crate::core::db::Database;
 use crate::core::mcp::transport::mcp_client::{HttpConnectConfig, McpClient, StdioConnectConfig};
 use crate::core::mcp::transport::stdio_client::{build_stdio_environment, find_executable_on_path};
+use crate::core::mcp::transport::McpError;
 use crate::core::services::event_bus::{EventBus, Evt};
 use crate::core::services::settings;
 use crate::core::services::tool_catalog::{ToolCatalogService, ToolDetail};
@@ -30,7 +31,7 @@ pub trait McpSession: Send {
         &'a self,
         tool_name: &'a str,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Value, McpError>> + Send + 'a>>;
     fn disconnect(&mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
     fn set_request_timeout_ms(&mut self, request_timeout_ms: u32);
     fn alive_receiver(&self) -> Option<tokio::sync::watch::Receiver<bool>>;
@@ -54,6 +55,8 @@ pub trait McpConnector: Send + Sync {
     ) -> BoxedConnectFuture<'a>;
 }
 
+type SharedMcpSession = Arc<Mutex<Box<dyn McpSession>>>;
+
 #[derive(Clone)]
 struct ServerSlot {
     name: String,
@@ -62,7 +65,8 @@ struct ServerSlot {
     start_token: u64,
     start_deadline: Option<Instant>,
     start_timeout_ms: Option<u32>,
-    session: Option<Arc<Mutex<Box<dyn McpSession>>>>,
+    session: Option<SharedMcpSession>,
+    reconnect_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +143,7 @@ impl ServerManager {
                     start_deadline: None,
                     start_timeout_ms: None,
                     session: None,
+                    reconnect_lock: Arc::new(Mutex::new(())),
                 },
             );
         }
@@ -165,6 +170,7 @@ impl ServerManager {
                 start_deadline: None,
                 start_timeout_ms: None,
                 session: None,
+                reconnect_lock: Arc::new(Mutex::new(())),
             },
         );
         managed
@@ -293,7 +299,9 @@ impl ServerManager {
                     }
                     return Ok(());
                 }
-                self.cache_tools(id, &tools);
+                if let Err(error) = self.cache_tools(id, &tools) {
+                    tracing::warn!(server_id = id, %error, "Failed to cache MCP tools after startup");
+                }
                 self.persist_server_status(id, "running", None);
                 self.spawn_death_watcher(id.to_string(), start_token, alive_rx);
                 Ok(())
@@ -436,9 +444,104 @@ impl ServerManager {
         }?;
 
         let request_timeout_ms = self.get_timeout_settings().request_ms;
-        let mut client = session_arc.lock().await;
-        client.set_request_timeout_ms(request_timeout_ms);
-        client.call_tool(&owner.tool_name, args).await
+        let result = {
+            let mut client = session_arc.lock().await;
+            client.set_request_timeout_ms(request_timeout_ms);
+            client.call_tool(&owner.tool_name, args.clone()).await
+        };
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(McpError::SessionInvalid(_)) => {
+                self.reconnect_server(&owner.server_id, &session_arc)
+                    .await?;
+                let new_session = {
+                    let slots = self.slots.lock().await;
+                    slots
+                        .get(&owner.server_id)
+                        .filter(|slot| matches!(slot.status, ServerStatus::Running))
+                        .and_then(|slot| slot.session.clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "Server \"{}\" is not running after MCP reconnect",
+                                owner.server_name
+                            )
+                        })?
+                };
+                let mut client = new_session.lock().await;
+                client.set_request_timeout_ms(request_timeout_ms);
+                // Return this attempt directly: a repeated expiry must not cause a retry loop.
+                client
+                    .call_tool(&owner.tool_name, args)
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    async fn reconnect_server(
+        &self,
+        id: &str,
+        failed_session: &SharedMcpSession,
+    ) -> Result<(), String> {
+        let reconnect_lock = {
+            let slots = self.slots.lock().await;
+            slots
+                .get(id)
+                .ok_or_else(|| format!("Server {id} not found"))?
+                .reconnect_lock
+                .clone()
+        };
+        let _reconnect_guard = reconnect_lock.lock().await;
+        {
+            let slots = self.slots.lock().await;
+            let current = slots
+                .get(id)
+                .filter(|slot| matches!(slot.status, ServerStatus::Running))
+                .and_then(|slot| slot.session.as_ref())
+                .ok_or_else(|| format!("Server {id} is no longer running"))?;
+            if !Arc::ptr_eq(current, failed_session) {
+                return Ok(());
+            }
+        }
+
+        let config = self.get_stored_config(id)?;
+        if config.connection_type != "http" {
+            return Err(format!("Server {id} is no longer configured for HTTP MCP"));
+        }
+        let timeouts = self.get_timeout_settings();
+        tracing::info!(server_id = id, "Reconnecting expired HTTP MCP session");
+        let (tools, new_client) = tokio::time::timeout(
+            Duration::from_millis(timeouts.start_ms as u64),
+            self.connector.connect(&config, timeouts),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "MCP reconnect for server {id} timed out after {}",
+                format_timeout_ms(timeouts.start_ms)
+            )
+        })?
+        .map_err(|err| format!("Failed to reconnect MCP server {id}: {err}"))?;
+
+        let mut slots = self.slots.lock().await;
+        let slot = slots
+            .get_mut(id)
+            .filter(|slot| matches!(slot.status, ServerStatus::Running))
+            .filter(|slot| {
+                slot.session
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, failed_session))
+            })
+            .ok_or_else(|| format!("MCP reconnect for server {id} was superseded or stopped"))?;
+
+        // Commit the cache and publish the session while stop/remove cannot change this slot.
+        self.cache_tools(id, &tools).map_err(|err| {
+            format!("Failed to cache tools while reconnecting MCP server {id}: {err}")
+        })?;
+        slot.session = Some(Arc::new(Mutex::new(new_client)));
+        Ok(())
     }
 
     pub async fn get_tool_catalog(
@@ -510,12 +613,13 @@ impl ServerManager {
         });
     }
 
-    fn cache_tools(&self, server_id: &str, tools: &[ToolInsert]) {
+    fn cache_tools(&self, server_id: &str, tools: &[ToolInsert]) -> Result<(), String> {
         let repo = ToolDiscoveryRepository::new(&self.db);
-        let _ = repo.replace_tools_for_server(server_id, tools);
+        repo.replace_tools_for_server(server_id, tools)?;
         self.event_bus.emit(Evt::ServerTools {
             server_id: server_id.to_string(),
         });
+        Ok(())
     }
 
     fn persist_server_status(&self, id: &str, status: &str, error_message: Option<&str>) {
@@ -734,6 +838,8 @@ impl StdioHttpConnector {
 
 #[cfg(test)]
 mod tests {
+    mod reconnect;
+
     use super::*;
     use crate::core::db::profile_repo::ProfileRepository;
     use std::time::SystemTime;
@@ -871,7 +977,7 @@ process.stdin.on("data", (chunk) => {{
     if (!line.trim()) continue;
     const request = JSON.parse(line);
     if (request.method === "initialize") {{
-      fs.appendFileSync({marker:?}, request.params?.clientInfo?.name + "\n");
+      fs.appendFileSync({marker:?}, JSON.stringify(request.params) + "\n");
       process.stdout.write(JSON.stringify({{ jsonrpc: "2.0", id: request.id, result: {{ protocolVersion: "2024-11-05", capabilities: {{ tools: {{}} }}, serverInfo: {{ name: "client-info", version: "1.0.0" }} }} }}) + "\n");
     }} else if (request.method === "tools/list") {{
       process.stdout.write(JSON.stringify({{ jsonrpc: "2.0", id: request.id, result: {{ tools: [] }} }}) + "\n");
@@ -1241,7 +1347,7 @@ process.stdin.on("data", (chunk) => {{
     }
 
     #[tokio::test]
-    async fn initialize_client_info_uses_configured_server_name() {
+    async fn initialize_stdio_preserves_protocol_version_and_uses_configured_server_name() {
         let data_dir = temp_data_dir("client-info-name");
         std::fs::create_dir_all(&data_dir).expect("failed to create temp dir");
         let marker = data_dir.join("client-info.log");
@@ -1269,7 +1375,9 @@ process.stdin.on("data", (chunk) => {{
 
         let client_info =
             std::fs::read_to_string(&marker).expect("client info marker should exist");
-        assert_eq!(client_info.trim(), "moor-readable-server");
+        let init_params: Value = serde_json::from_str(&client_info).expect("initialize params");
+        assert_eq!(init_params["clientInfo"]["name"], "moor-readable-server");
+        assert_eq!(init_params["protocolVersion"], "2024-11-05");
 
         manager.stop_server(&server_id).await.expect("stop failed");
         let _ = std::fs::remove_dir_all(data_dir);
@@ -1502,7 +1610,7 @@ process.stdin.on("data", (chunk) => {{
             &'a self,
             _tool_name: &'a str,
             _args: Value,
-        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Value, McpError>> + Send + 'a>> {
             Box::pin(async move { Ok(serde_json::json!({})) })
         }
         fn disconnect(&mut self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {

@@ -7,10 +7,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use super::format_timeout_duration;
+use super::{format_timeout_duration, McpError};
 
 static ENV_PATTERN: OnceLock<regex_lite::Regex> = OnceLock::new();
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
+const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+const DEFAULT_HTTP_PROTOCOL_VERSION: &str = "2025-11-25";
 const REMOTE_MCP_ERROR_PREFIX: &str = "Remote MCP server error: ";
 
 /// MCP Client over HTTP transport (Streamable HTTP or SSE).
@@ -21,6 +23,7 @@ pub struct HttpClientTransport {
     client: reqwest::Client,
     mode: Mutex<HttpMode>,
     session_id: Mutex<Option<String>>,
+    protocol_version: Mutex<String>,
     request_timeout: Duration,
 }
 
@@ -43,7 +46,7 @@ struct SseEvent {
 
 enum StreamableError {
     Unsupported(String),
-    Failed(String),
+    Failed(McpError),
 }
 
 impl HttpClientTransport {
@@ -54,12 +57,24 @@ impl HttpClientTransport {
             client: reqwest::Client::new(),
             mode: Mutex::new(HttpMode::Unknown),
             session_id: Mutex::new(None),
+            protocol_version: Mutex::new(DEFAULT_HTTP_PROTOCOL_VERSION.to_string()),
             request_timeout,
         }
     }
 
     pub fn set_request_timeout(&mut self, request_timeout: Duration) {
         self.request_timeout = request_timeout;
+    }
+
+    pub async fn protocol_version(&self) -> String {
+        self.protocol_version.lock().await.clone()
+    }
+
+    pub async fn set_protocol_version(&self, version: &str) {
+        let version = version.trim();
+        if !version.is_empty() {
+            *self.protocol_version.lock().await = version.to_string();
+        }
     }
 
     /// Send a JSON-RPC request and get the response.
@@ -69,7 +84,7 @@ impl HttpClientTransport {
         id: i64,
         method: &str,
         params: Option<Value>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, McpError> {
         let timeout = self.request_timeout;
         tokio::time::timeout(timeout, self.send_request_inner(id, method, params))
             .await
@@ -86,14 +101,17 @@ impl HttpClientTransport {
         id: i64,
         method: &str,
         params: Option<Value>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, McpError> {
         let mut mode = self.mode.lock().await;
         match &mut *mode {
             HttpMode::Streamable => self
                 .send_streamable_request(id, method, params)
                 .await
-                .map_err(StreamableError::into_message),
-            HttpMode::Sse(state) => self.send_sse_request(state, id, method, params).await,
+                .map_err(StreamableError::into_error),
+            HttpMode::Sse(state) => self
+                .send_sse_request(state, id, method, params)
+                .await
+                .map_err(McpError::Other),
             HttpMode::Unknown => match self
                 .send_streamable_request(id, method, params.clone())
                 .await
@@ -131,8 +149,7 @@ impl HttpClientTransport {
         let builder = self
             .streamable_post_builder()
             .await
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2024-11-05");
+            .header("accept", "application/json, text/event-stream");
 
         let response = builder
             .json(&request_body)
@@ -142,20 +159,7 @@ impl HttpClientTransport {
 
         let status = response.status();
         if !status.is_success() {
-            if let Some(message) = remote_jsonrpc_error_message(response).await {
-                return Err(StreamableError::Failed(format!(
-                    "{REMOTE_MCP_ERROR_PREFIX}{message}"
-                )));
-            }
-            return if is_streamable_unsupported_status(status) {
-                Err(StreamableError::Unsupported(format!(
-                    "Streamable HTTP unsupported: {status}"
-                )))
-            } else {
-                Err(StreamableError::Failed(format!(
-                    "HTTP request failed: {status}"
-                )))
-            };
+            return Err(self.streamable_error(response, "HTTP request").await);
         }
 
         self.capture_streamable_session_id(method, response.headers())
@@ -173,7 +177,7 @@ impl HttpClientTransport {
             let mut buffer = String::new();
             read_sse_jsonrpc_response(&mut response, &mut buffer, Some(id), self.request_timeout)
                 .await
-                .map_err(StreamableError::Failed)
+                .map_err(|err| StreamableError::Failed(McpError::Other(err)))
         } else {
             let body = response.json::<Value>().await.map_err(|e| {
                 StreamableError::Unsupported(format!(
@@ -186,7 +190,7 @@ impl HttpClientTransport {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown error");
-                return Err(StreamableError::Failed(msg.to_string()));
+                return Err(StreamableError::Failed(McpError::Other(msg.to_string())));
             }
             Ok(body.get("result").cloned().unwrap_or(Value::Null))
         }
@@ -196,14 +200,17 @@ impl HttpClientTransport {
         &self,
         method: &str,
         params: Option<Value>,
-    ) -> Result<(), String> {
+    ) -> Result<(), McpError> {
         let mut mode = self.mode.lock().await;
         match &mut *mode {
             HttpMode::Streamable => self
                 .send_streamable_notification(method, params)
                 .await
-                .map_err(StreamableError::into_message),
-            HttpMode::Sse(state) => self.send_sse_notification(state, method, params).await,
+                .map_err(StreamableError::into_error),
+            HttpMode::Sse(state) => self
+                .send_sse_notification(state, method, params)
+                .await
+                .map_err(McpError::Other),
             HttpMode::Unknown => match self
                 .send_streamable_notification(method, params.clone())
                 .await
@@ -239,41 +246,58 @@ impl HttpClientTransport {
             .streamable_post_builder()
             .await
             .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2024-11-05")
             .json(&request_body)
             .send()
             .await
             .map_err(|e| StreamableError::Unsupported(format!("HTTP notification failed: {e}")))?;
         if !response.status().is_success() {
-            let status = response.status();
-            if let Some(message) = remote_jsonrpc_error_message(response).await {
-                return Err(StreamableError::Failed(format!(
-                    "{REMOTE_MCP_ERROR_PREFIX}{message}"
-                )));
-            }
-            return if is_streamable_unsupported_status(status) {
-                Err(StreamableError::Unsupported(format!(
-                    "Streamable HTTP unsupported: {status}"
-                )))
-            } else {
-                Err(StreamableError::Failed(format!(
-                    "HTTP notification failed: {status}"
-                )))
-            };
+            return Err(self.streamable_error(response, "HTTP notification").await);
         }
         Ok(())
     }
 
     async fn streamable_post_builder(&self) -> reqwest::RequestBuilder {
         let session_id = self.session_id.lock().await.clone();
-        let mut builder = self.client.post(&self.url);
-        for (key, value) in &self.headers {
-            builder = builder.header(key, value);
-        }
+        let mut builder = self.request_builder(reqwest::Method::POST, &self.url).await;
         if let Some(session_id) = session_id {
             builder = builder.header(MCP_SESSION_ID_HEADER, session_id);
         }
         builder
+    }
+
+    async fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let mut builder = self.client.request(method, url);
+        for (key, value) in &self.headers {
+            // reqwest appends headers, so a configured version must not shadow negotiation.
+            if !key.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER) {
+                builder = builder.header(key, value);
+            }
+        }
+        builder.header(MCP_PROTOCOL_VERSION_HEADER, self.protocol_version().await)
+    }
+
+    async fn streamable_error(
+        &self,
+        response: reqwest::Response,
+        operation: &str,
+    ) -> StreamableError {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if self.session_id.lock().await.is_some() && is_invalid_session_response(status, &body) {
+            return StreamableError::Failed(McpError::SessionInvalid(format!(
+                "HTTP MCP session invalid ({status}): {body}"
+            )));
+        }
+        if let Some(message) = remote_jsonrpc_error_message(&body) {
+            return StreamableError::Failed(McpError::Other(format!(
+                "{REMOTE_MCP_ERROR_PREFIX}{message}"
+            )));
+        }
+        if is_streamable_unsupported_status(status) {
+            StreamableError::Unsupported(format!("Streamable HTTP unsupported: {status}"))
+        } else {
+            StreamableError::Failed(McpError::Other(format!("{operation} failed: {status}")))
+        }
     }
 
     async fn capture_streamable_session_id(
@@ -296,13 +320,10 @@ impl HttpClientTransport {
     }
 
     async fn open_sse(&self) -> Result<SseState, String> {
-        let mut builder = self.client.get(&self.url);
-        for (key, value) in &self.headers {
-            builder = builder.header(key, value);
-        }
-        let response = builder
+        let response = self
+            .request_builder(reqwest::Method::GET, &self.url)
+            .await
             .header("accept", "text/event-stream")
-            .header("mcp-protocol-version", "2024-11-05")
             .send()
             .await
             .map_err(|e| format!("SSE connection failed: {e}"))?;
@@ -364,13 +385,10 @@ impl HttpClientTransport {
     }
 
     async fn post_sse_message(&self, state: &SseState, message: &Value) -> Result<(), String> {
-        let mut builder = self.client.post(&state.endpoint);
-        for (key, value) in &self.headers {
-            builder = builder.header(key, value);
-        }
-        let response = builder
+        let response = self
+            .request_builder(reqwest::Method::POST, &state.endpoint)
+            .await
             .header("accept", "application/json")
-            .header("mcp-protocol-version", "2024-11-05")
             .json(message)
             .send()
             .await
@@ -384,19 +402,31 @@ impl HttpClientTransport {
 }
 
 impl StreamableError {
-    fn into_message(self) -> String {
+    fn into_error(self) -> McpError {
         match self {
-            StreamableError::Unsupported(message) | StreamableError::Failed(message) => message,
+            StreamableError::Unsupported(message) => McpError::Other(message),
+            StreamableError::Failed(err) => err,
         }
     }
+}
+
+fn is_invalid_session_response(status: reqwest::StatusCode, body: &str) -> bool {
+    if !matches!(status.as_u16(), 400 | 404) {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    body.contains("session")
+        && ["invalid", "expired", "not found", "unknown", "no valid"]
+            .iter()
+            .any(|phrase| body.contains(phrase))
 }
 
 fn is_streamable_unsupported_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 400 | 404 | 405 | 406 | 415)
 }
 
-async fn remote_jsonrpc_error_message(response: reqwest::Response) -> Option<String> {
-    let body = response.json::<Value>().await.ok()?;
+fn remote_jsonrpc_error_message(body: &str) -> Option<String> {
+    let body = serde_json::from_str::<Value>(body).ok()?;
     jsonrpc_error_message(&body).map(String::from)
 }
 
@@ -584,6 +614,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod session;
+
     use super::*;
     use crate::core::mcp::transport::mcp_client::{HttpConnectConfig, McpClient};
     use axum::{
@@ -910,7 +942,7 @@ mod tests {
             .expect_err("JSON-RPC error body should be returned as a transport error");
 
         assert_eq!(
-            err,
+            err.to_string(),
             "Remote MCP server error: Bad Request: No valid session ID provided"
         );
         server.abort();
@@ -939,7 +971,7 @@ mod tests {
             .await
             .expect_err("slow JSON response should time out");
 
-        assert!(err.contains("timed out"));
+        assert!(matches!(&err, McpError::Other(message) if message.contains("timed out")));
         server.abort();
     }
 
@@ -974,7 +1006,9 @@ mod tests {
             .await
             .expect_err("SSE fallback request should use the overall request timeout");
 
-        assert!(err.contains("timed out after 50ms"));
+        assert!(
+            matches!(&err, McpError::Other(message) if message.contains("timed out after 50ms"))
+        );
         server.abort();
     }
 }

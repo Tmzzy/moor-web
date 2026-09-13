@@ -4,6 +4,7 @@
 use crate::core::db::tool_discovery_repo::ToolInsert;
 use crate::core::mcp::transport::http_client::HttpClientTransport;
 use crate::core::mcp::transport::stdio_client::StdioClientTransport;
+use crate::core::mcp::transport::McpError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -14,8 +15,8 @@ pub struct McpClient {
 }
 
 enum McpTransport {
-    Stdio(StdioClientTransport),
-    Http(HttpClientTransport),
+    Stdio(Box<StdioClientTransport>),
+    Http(Box<HttpClientTransport>),
 }
 
 pub struct StdioConnectConfig {
@@ -45,7 +46,7 @@ impl McpClient {
         )
         .await?;
         let mut client = Self {
-            transport: McpTransport::Stdio(transport),
+            transport: McpTransport::Stdio(Box::new(transport)),
             server_name: config.server_name,
         };
         client.handshake().await?;
@@ -59,7 +60,7 @@ impl McpClient {
             Duration::from_millis(config.request_timeout_ms as u64),
         );
         let mut client = Self {
-            transport: McpTransport::Http(transport),
+            transport: McpTransport::Http(Box::new(transport)),
             server_name: config.server_name,
         };
         client.handshake().await?;
@@ -75,13 +76,14 @@ impl McpClient {
             McpTransport::Http(t) => {
                 let id = chrono::Utc::now().timestamp_millis();
                 t.send_request(id, "tools/list", Some(serde_json::json!({})))
-                    .await?
+                    .await
+                    .map_err(|err| err.to_string())?
             }
         };
         Ok(parse_tools_list(&result))
     }
 
-    pub async fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value, String> {
+    pub async fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value, McpError> {
         let params = serde_json::json!({
             "name": tool_name,
             "arguments": args,
@@ -90,7 +92,7 @@ impl McpClient {
             McpTransport::Stdio(t) => t
                 .send_request("tools/call", Some(params))
                 .await
-                .map_err(|err| self.enrich_stdio_error(&err)),
+                .map_err(|err| McpError::Other(self.enrich_stdio_error(&err))),
             McpTransport::Http(t) => {
                 let id = chrono::Utc::now().timestamp_millis();
                 t.send_request(id, "tools/call", Some(params)).await
@@ -121,8 +123,12 @@ impl McpClient {
     }
 
     async fn handshake(&mut self) -> Result<(), String> {
+        let protocol_version = match &self.transport {
+            McpTransport::Stdio(_) => "2024-11-05".to_string(),
+            McpTransport::Http(t) => t.protocol_version().await,
+        };
         let init_params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "capabilities": {},
             "clientInfo": {
                 "name": format!("moor-{}", self.server_name),
@@ -142,9 +148,16 @@ impl McpClient {
             }
             McpTransport::Http(t) => {
                 let id = chrono::Utc::now().timestamp_millis();
-                let _ = t.send_request(id, "initialize", Some(init_params)).await?;
+                let result = t
+                    .send_request(id, "initialize", Some(init_params))
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if let Some(version) = result.get("protocolVersion").and_then(Value::as_str) {
+                    t.set_protocol_version(version).await;
+                }
                 t.send_notification("notifications/initialized", Some(serde_json::json!({})))
-                    .await?;
+                    .await
+                    .map_err(|err| err.to_string())?;
             }
         }
         Ok(())
@@ -198,7 +211,7 @@ impl crate::core::services::server_manager::McpSession for McpClient {
         &'a self,
         tool_name: &'a str,
         args: Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, McpError>> + Send + 'a>>
     {
         Box::pin(async move { McpClient::call_tool(self, tool_name, args).await })
     }
