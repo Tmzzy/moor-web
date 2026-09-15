@@ -1,6 +1,9 @@
 name: Container
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -147,6 +150,7 @@ jobs:
           '
 
   publish:
+    if: github.event_name != 'pull_request'
     needs: verify
     runs-on: ubuntu-latest
     permissions:

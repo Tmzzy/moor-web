@@ -95,7 +95,7 @@ pub async fn handle_mcp_request(
 
     if accepts_sse {
         // Return as SSE event stream
-        let sse_data = format!("event: message\ndata: {}\n\n", response);
+        let sse_data = format!("event: message\ndata: {response}\n\n");
         (
             StatusCode::OK,
             [
