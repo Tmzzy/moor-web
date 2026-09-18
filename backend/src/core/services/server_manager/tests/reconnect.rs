@@ -21,6 +21,7 @@ struct Fixture {
     db: Arc<Database>,
     manager: Arc<ServerManager>,
     id: String,
+    profile_id: String,
 }
 
 impl Fixture {
@@ -28,11 +29,16 @@ impl Fixture {
         let data_dir = temp_data_dir("http-reconnect");
         std::fs::create_dir_all(&data_dir).expect("create test data directory");
         let (db, manager) = build_manager_with_fake_connector(&data_dir, connector);
+        let profile_id = ProfileRepository::new(&db)
+            .create("Recovery tests")
+            .expect("create recovery test profile")
+            .id;
         Self {
             data_dir,
             db,
             manager,
             id: uuid::Uuid::new_v4().to_string(),
+            profile_id,
         }
     }
 
@@ -51,11 +57,12 @@ impl Fixture {
                     headers: None,
                     working_dir: None,
                     auto_start: false,
+                    profile_ids: vec![self.profile_id.clone()],
                 },
             )
             .expect("insert HTTP server");
         ProfileRepository::new(&self.db)
-            .assign_to_active_profile(std::slice::from_ref(&self.id))
+            .assign_to_profile(&self.profile_id, std::slice::from_ref(&self.id))
             .expect("assign HTTP server to profile");
         self.manager.load_from_db().await;
         self.manager
@@ -285,17 +292,19 @@ async fn concurrent_expired_calls_share_a_new_session_and_preserve_arguments_and
     let mut events = fixture.manager.event_bus.subscribe();
 
     let first_manager = fixture.manager.clone();
+    let first_profile_id = fixture.profile_id.clone();
     let first = tokio::spawn(async move {
         first_manager
-            .call_tool("recovery__echo", json!({"caller": 1}))
+            .call_tool(&first_profile_id, "recovery__echo", json!({"caller": 1}))
             .await
     });
     acquire(&connector.started, 2).await;
     acquire(&old_probe.called, 1).await;
     let second_manager = fixture.manager.clone();
+    let second_profile_id = fixture.profile_id.clone();
     let second = tokio::spawn(async move {
         second_manager
-            .call_tool("recovery__echo", json!({"caller": 2}))
+            .call_tool(&second_profile_id, "recovery__echo", json!({"caller": 2}))
             .await
     });
     acquire(&old_probe.called, 1).await;
@@ -333,6 +342,33 @@ async fn concurrent_expired_calls_share_a_new_session_and_preserve_arguments_and
 }
 
 #[tokio::test]
+async fn recovered_tools_remain_scoped_to_the_assigned_profile() {
+    let (old, _) = ConnectStep::session("A", CallOutcome::Expired);
+    let (new, new_probe) = ConnectStep::session("B", CallOutcome::Success);
+    let connector = RecoveryConnector::new(vec![old, new]);
+    let fixture = Fixture::new(connector.clone());
+    fixture.start("http://unused.invalid/mcp").await;
+    let other_profile = ProfileRepository::new(&fixture.db)
+        .create("Unassigned profile")
+        .expect("create unassigned profile");
+
+    fixture
+        .manager
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
+        .await
+        .expect("assigned profile recovers the expired session");
+    let err = fixture
+        .manager
+        .call_tool(&other_profile.id, "recovery__echo", json!({}))
+        .await
+        .expect_err("unassigned profile must not call the recovered tool");
+
+    assert_eq!(err, "Tool \"recovery__echo\" not found or disabled");
+    assert_eq!(connector.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(new_probe.calls.lock().expect("new calls").len(), 1);
+}
+
+#[tokio::test]
 async fn ordinary_errors_never_reconnect_even_if_the_message_mentions_session_expiry() {
     let (old, probe) = ConnectStep::session("A", CallOutcome::Other);
     let connector = RecoveryConnector::new(vec![old]);
@@ -340,7 +376,7 @@ async fn ordinary_errors_never_reconnect_even_if_the_message_mentions_session_ex
     fixture.start("http://unused.invalid/mcp").await;
     let err = fixture
         .manager
-        .call_tool("recovery__echo", json!({}))
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
         .await
         .expect_err("ordinary error");
     assert_eq!(err, "400 Session expired is ordinary error text");
@@ -357,7 +393,7 @@ async fn expiry_on_the_retry_is_returned_without_a_third_call_or_connection() {
     fixture.start("http://unused.invalid/mcp").await;
     let err = fixture
         .manager
-        .call_tool("recovery__echo", json!({}))
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
         .await
         .expect_err("retry also expires");
     assert_eq!(err, "Session expired");
@@ -381,7 +417,7 @@ async fn reconnect_failure_preserves_the_session_cache_and_lifecycle() {
     let mut events = fixture.manager.event_bus.subscribe();
     let err = fixture
         .manager
-        .call_tool("recovery__echo", json!({}))
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
         .await
         .expect_err("reconnect fails");
     assert!(err.contains("initialize failed"));
@@ -424,7 +460,7 @@ async fn cache_failure_rolls_back_and_discards_the_new_client_without_retrying()
     let mut events = fixture.manager.event_bus.subscribe();
     let err = fixture
         .manager
-        .call_tool("recovery__echo", json!({}))
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
         .await
         .expect_err("cache insert fails");
     assert!(err.contains("Failed to cache tools") && err.contains("UNIQUE constraint failed"));
@@ -463,7 +499,9 @@ async fn reconnect_timeout_discards_the_candidate_and_does_not_retry() {
     let mut events = fixture.manager.event_bus.subscribe();
     let err = tokio::time::timeout(
         Duration::from_secs(8),
-        fixture.manager.call_tool("recovery__echo", json!({})),
+        fixture
+            .manager
+            .call_tool(&fixture.profile_id, "recovery__echo", json!({})),
     )
     .await
     .expect("reconnect must respect configured deadline")
@@ -490,8 +528,12 @@ async fn stop_remove_and_restart_reject_a_late_reconnect_result() {
         let fixture = Fixture::new(connector.clone());
         fixture.start("http://unused.invalid/mcp").await;
         let manager = fixture.manager.clone();
-        let call =
-            tokio::spawn(async move { manager.call_tool("recovery__echo", json!({})).await });
+        let profile_id = fixture.profile_id.clone();
+        let call = tokio::spawn(async move {
+            manager
+                .call_tool(&profile_id, "recovery__echo", json!({}))
+                .await
+        });
         acquire(&connector.started, 2).await;
         match action {
             "stop" => fixture
@@ -691,7 +733,7 @@ async fn http_recovery_negotiates_new_session_replaces_schema_then_retries_origi
         let args = json!({"message": "original arguments", "nested": {"count": 3}});
         let result = fixture
             .manager
-            .call_tool("recovery__echo", args.clone())
+            .call_tool(&fixture.profile_id, "recovery__echo", args.clone())
             .await
             .expect("recover HTTP session");
         assert_eq!(result, args);
@@ -761,7 +803,7 @@ async fn failed_tools_list_after_http_reconnect_preserves_cache_and_does_not_ret
     let mut events = fixture.manager.event_bus.subscribe();
     let err = fixture
         .manager
-        .call_tool("recovery__echo", json!({}))
+        .call_tool(&fixture.profile_id, "recovery__echo", json!({}))
         .await
         .expect_err("new tools/list fails");
     assert!(err.contains("tool list unavailable"));
